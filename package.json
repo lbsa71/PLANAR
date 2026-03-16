@@ -1,0 +1,23 @@
+{
+  "name": "planar",
+  "version": "0.1.0",
+  "description": "Plan-Level Adaptive Narrowing And Refinement — a Ralph Wiggum pattern task decomposer for Claude Code",
+  "main": "dist/cli.js",
+  "bin": {
+    "planar": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/cli.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit"
+  },
+  "keywords": ["claude-code", "task-decomposition", "planning", "ai-agents"],
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0",
+    "@types/node": "^22.0.0"
+  }
+}
