@@ -272,6 +272,18 @@ The wrapper needs to know when to stop. An iteration exits the loop when **any**
 
 The LLM signals "no operation" by returning the card file unchanged. The wrapper diffs the before/after — if identical, the card has converged and the loop ends.
 
+### Debug Logging
+
+All process errors, invocation failures, and operational events are captured in `debug.log` at the working directory root. The log file is capped at **200 lines** (most recent kept) to prevent unbounded growth.
+
+The debug log captures:
+- **Process spawn/exit events** — which agent was spawned, exit codes
+- **Full error context on failure** — command, args, error message, error code (e.g. `ENOENT`), error path, last 500 chars of stdout/stderr
+- **Rate limit events** — 429 responses and retry timing
+- **Cost tracking** — per-iteration cost from Claude Code JSON output
+
+Console output stays terse (one-line summaries). The debug log gets the full story. When something goes wrong, `debug.log` is the first place to look.
+
 ## Project Structure
 
 PLANAR expects `plan/` and `src/` at the **repository root**:

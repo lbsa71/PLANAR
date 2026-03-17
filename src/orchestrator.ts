@@ -8,6 +8,7 @@ import {
   formatStatus,
   checkReferenceIntegrity,
 } from "./card.js";
+import { debugLog, debugLogProcessError } from "./debug-log.js";
 import { dotPathToGuid } from "./guid.js";
 import { generateSystemPrompt } from "./system-prompt.js";
 import {
@@ -185,26 +186,30 @@ export class Orchestrator {
 
     const prompt = `@${card.filePath} @${this.config.rootPlanFile}\n\nDo the next thing for this card. Perform exactly one operation, update the card file, and exit.`;
 
+    const spawnArgs = [
+      "--dangerously-skip-permissions",
+      "--print",
+      "--output-format",
+      "json",
+      "--session-id",
+      sessionId,
+      "--system-prompt",
+      systemPrompt,
+      "--",
+      prompt,
+    ];
+
     console.log(
       `[orchestrator] Spawning agent for ${card.dotPath} [${isPhase(card.status) ? card.status : formatStatus(card.status)}]`
     );
-
-    const proc = this.deps.spawner.spawn(
-      "claude",
-      [
-        "--dangerously-skip-permissions",
-        "--print",
-        "--output-format",
-        "json",
-        "--session-id",
-        sessionId,
-        "--system-prompt",
-        systemPrompt,
-        "--",
-        prompt,
-      ],
-      { stdio: "pipe" }
+    debugLog(
+      `Spawning agent for ${card.dotPath} — claude ${spawnArgs.slice(0, 6).join(" ")} ...`
     );
+
+    const proc = this.deps.spawner.spawn("claude", spawnArgs, {
+      stdio: "pipe",
+      shell: true,
+    });
 
     const slot: AgentSlot = {
       dotPath: card.dotPath,
@@ -231,14 +236,36 @@ export class Orchestrator {
 
     const completionPromise = new Promise<string>((resolve) => {
       proc.on("close", (code) => {
+        debugLog(
+          `Agent ${card.dotPath} exited with code ${code}`
+        );
+        if (code !== 0) {
+          debugLogProcessError({
+            dotPath: card.dotPath,
+            command: "claude",
+            args: spawnArgs,
+            error: new Error(`Process exited with code ${code}`),
+            stdout,
+            stderr,
+            exitCode: code,
+          });
+        }
         if (stderr) {
-          process.stderr.write(`[${card.dotPath}] ${stderr}`);
+          process.stderr.write(`[${card.dotPath}] ${stderr}\n`);
         }
         this.handleAgentOutput(card.dotPath, stdout, code);
         resolve(card.dotPath);
       });
       proc.on("error", (err) => {
-        console.error(`[${card.dotPath}] Process error:`, err.message);
+        console.error(`[${card.dotPath}] Process error: ${err.message}`);
+        debugLogProcessError({
+          dotPath: card.dotPath,
+          command: "claude",
+          args: spawnArgs,
+          error: err,
+          stdout,
+          stderr,
+        });
         resolve(card.dotPath);
       });
     });

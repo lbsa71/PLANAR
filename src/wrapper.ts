@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import { parseCard, discoverCards, checkReferenceIntegrity } from "./card.js";
+import { debugLog, debugLogProcessError } from "./debug-log.js";
 import { dotPathToGuid } from "./guid.js";
 import { generateSystemPrompt } from "./system-prompt.js";
 import {
@@ -26,6 +27,7 @@ const defaultClaude: ClaudeInvoker = {
         stdio: ["pipe", "pipe", "inherit"],
         encoding: "utf-8",
         timeout: timeoutMs,
+        shell: true,
       });
     } catch (err: unknown) {
       if (err && typeof err === "object" && "stdout" in err) {
@@ -110,38 +112,51 @@ export async function runCardLoop(
       `[${card.dotPath}] Iteration ${i + 1}/${maxIterations} — phase: [${card.status}]`
     );
 
+    const invokeArgs = [
+      "--dangerously-skip-permissions",
+      "--print",
+      "--output-format",
+      "json",
+      "--session-id",
+      sessionId,
+      "--system-prompt",
+      systemPrompt,
+      "--",
+      `@${cardFile} @${rootPlanFile}\n\nDo the next thing for this card. Perform exactly one operation, update the card file, and exit.`,
+    ];
+
+    debugLog(
+      `[${card.dotPath}] Iteration ${i + 1} — invoking claude`
+    );
+
     try {
-      const output = deps.claude.invoke(
-        [
-          "--dangerously-skip-permissions",
-          "--print",
-          "--output-format",
-          "json",
-          "--session-id",
-          sessionId,
-          "--system-prompt",
-          systemPrompt,
-          "--",
-          `@${cardFile} @${rootPlanFile}\n\nDo the next thing for this card. Perform exactly one operation, update the card file, and exit.`,
-        ],
-        5 * 60 * 1000
-      );
+      const output = deps.claude.invoke(invokeArgs, 5 * 60 * 1000);
 
       const parsed = parseClaudeOutput(output);
       if (parsed.costUsd !== undefined) {
         accumulatedCost += parsed.costUsd;
+        debugLog(`[${card.dotPath}] Cost: $${parsed.costUsd.toFixed(4)}`);
       }
       if (parsed.rateLimited) {
         const wait = parsed.retryAfterSecs ?? 60;
         console.warn(
           `[${card.dotPath}] Rate limited (429). Waiting ${wait}s...`
         );
+        debugLog(`[${card.dotPath}] Rate limited, waiting ${wait}s`);
         await sleep(wait * 1000);
         i--;
         continue;
       }
     } catch (err) {
-      console.error(`[${card.dotPath}] Claude invocation failed:`, err);
+      console.error(
+        `[${card.dotPath}] Claude invocation failed: ${err instanceof Error ? err.message : err}`
+      );
+      debugLogProcessError({
+        dotPath: card.dotPath,
+        command: "claude",
+        args: invokeArgs,
+        error: err,
+      });
       break;
     }
 
