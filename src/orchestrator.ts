@@ -1,5 +1,6 @@
 import { ChildProcess, spawn } from "node:child_process";
 import * as fs from "node:fs";
+import * as path from "node:path";
 import {
   parseCard,
   discoverCards,
@@ -7,6 +8,8 @@ import {
   updateCardStatus,
   formatStatus,
   checkReferenceIntegrity,
+  parseFrontmatter,
+  stripFrontmatter,
 } from "./card.js";
 import { debugLog, debugLogProcessError } from "./debug-log.js";
 import { resolveClaudePath } from "./resolve-claude.js";
@@ -75,7 +78,13 @@ export class Orchestrator {
   }
 
   async run(): Promise<void> {
+    // Derive planDir from root file if it wasn't explicitly configured
+    this.config.planDir = path.dirname(this.config.rootPlanFile);
+
+    this.initializeRootCard();
+
     this.dashboard.log("*", `Starting with root: ${this.config.rootPlanFile}`);
+    this.dashboard.log("*", `Plan dir: ${this.config.planDir}`);
     this.dashboard.log("*", `Max parallel agents: ${this.config.maxParallelAgents}`);
 
     let staleCycles = 0;
@@ -145,6 +154,37 @@ export class Orchestrator {
     this.dashboard.render(finalCards, this.activeAgents, this.iterationCounts);
     this.dashboard.cleanup();
     this.cleanup();
+  }
+
+  /**
+   * Initialize an uninitialized root card.
+   * Adds YAML frontmatter and [PLAN] status tag if missing.
+   */
+  private initializeRootCard(): void {
+    const rootFile = this.config.rootPlanFile;
+    if (!this.deps.fs.existsSync(rootFile)) return;
+
+    const content = this.deps.fs.readFileSync(rootFile, "utf-8");
+    const fm = parseFrontmatter(content);
+
+    // Already has frontmatter with root — assume initialized
+    if (fm.root) return;
+
+    const body = stripFrontmatter(content);
+    const headingMatch = body.match(/^(#\s+.+)$/m);
+    if (!headingMatch) return;
+
+    // Check if heading already has a status tag
+    if (/\[(?:PLAN|ARCHITECT|IMPLEMENT|REVIEW|DONE)\]/.test(headingMatch[1])) return;
+
+    const frontmatter = `---\nroot: ${rootFile}\n---\n`;
+    const newBody = body.replace(
+      headingMatch[1],
+      `${headingMatch[1]} [PLAN]`
+    );
+
+    this.deps.fs.writeFileSync(rootFile, frontmatter + newBody);
+    this.dashboard.log("*", `Initialized root card: ${rootFile}`);
   }
 
   /**
