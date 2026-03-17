@@ -9,8 +9,10 @@ A best-in-class task decomposer that uses a Ralph Wiggum pattern — a thin, che
 PLANAR takes a high-level task description (the **root plan**) and decomposes it into actionable sub-plans through successive iterations. Each iteration is a standalone Claude Code CLI invocation that receives:
 
 1. A **system prompt** with the decomposition rules
-2. The contents of the **current card file** (with an `@`-reference to itself and to the root plan)
+2. The **current card file** and the **root plan** as `@`-file references (Claude Code's native file-reading syntax, e.g. `@plan/2.1-parser.md @plan/root.md`)
 3. Instructions for what to do next
+
+> **Note on `@` syntax:** Throughout this document, `@path/to/file` refers to **Claude Code file references** — the mechanism by which Claude Code reads a file into the conversation context. These are prompt-level constructs, not card metadata. Card metadata (parent, children, dependencies) lives in **YAML frontmatter**.
 
 The wrapper doesn't reason. It doesn't decide. It just keeps calling Claude Code with the card file until the work is done. That's the Ralph Wiggum pattern — "I'm helping!"
 
@@ -20,25 +22,26 @@ Every plan item is its own file — a **card**. An agent works on exactly one ca
 
 A card is either a **node** or a **leaf**, determined solely by whether it has children:
 
-- **Nodes** (have `@-children`) — structural. A node is about *decomposition*, not implementation. It is `[DONE]` when it has the right children with the right boundaries, regardless of the children's own status.
-- **Leaves** (no `@-children`) — work items. Leaves go through the full phase lifecycle (`PLAN → ARCHITECT → IMPLEMENT → REVIEW → DONE`). These are where actual architecture and implementation happen.
+- **Nodes** (have `children:` in frontmatter) — structural. A node is about *decomposition*, not implementation. It is `[DONE]` when it has the right children with the right boundaries, regardless of the children's own status.
+- **Leaves** (no `children:`) — work items. Leaves go through the full phase lifecycle (`PLAN → ARCHITECT → IMPLEMENT → REVIEW → DONE`). These are where actual architecture and implementation happen.
 
-This distinction is **fluid**. A leaf becomes a node the moment you **Hierarchize** it (add children). A node becomes a leaf when you **Collapse** it (remove children). The card file itself doesn't declare "I am a node" — it simply has or doesn't have `@-children`, and the rules follow from that.
+This distinction is **fluid**. A leaf becomes a node the moment you **Hierarchize** it (add children). A node becomes a leaf when you **Collapse** it (remove children). The card file itself doesn't declare "I am a node" — it simply has or doesn't have `children:` in its frontmatter, and the rules follow from that.
 
 ### Card Structure
 
-A card file contains:
+A card file uses **YAML frontmatter** for structural metadata and standard markdown for content:
 
 ```markdown
-# 2.1 Plan Parser [PLAN]
-
-@-parent: plan/2-core-engine.md
-@-root: plan/root.md
-@-children:
+---
+parent: plan/2-core-engine.md
+root: plan/root.md
+children:
   - plan/2.1.1-tokenizer.md
   - plan/2.1.2-ast-builder.md
-@-blocked-by:
+blocked-by:
   - plan/1.2-build-system.md
+---
+# 2.1 Plan Parser [PLAN]
 
 ## Description
 Parse plan files into an in-memory tree structure.
@@ -51,13 +54,24 @@ Files of interest (not ownership — multiple cards may reference the same file)
 
 ## Acceptance Criteria
 - Parses nested dot-path items
-- Validates @-references
+- Validates card links
 - Returns structured tree
 ```
 
-### Reference Integrity
+The frontmatter fields are:
 
-All parent/child relationships and dependencies are documented in each card using `@`-references. Every iteration must verify that all references are correct and complete. Broken links are bugs.
+| Field | Description |
+|---|---|
+| `parent` | Path to the parent card |
+| `root` | Path to the root plan card |
+| `children` | List of child card paths (presence makes the card a **node**) |
+| `blocked-by` | List of card paths that must reach `[DONE]` before this card can proceed |
+
+These are **card links** — structural metadata parsed by PLANAR. They are distinct from `@`-file references, which are Claude Code's syntax for reading files into conversation context. When the wrapper invokes Claude Code, it passes `@plan/2.1-parser.md @plan/root.md` as prompt-level file references so Claude can read the card contents.
+
+### Link Integrity
+
+All parent/child relationships and dependencies are documented in each card's frontmatter. Every iteration must verify that all card links are correct and complete. Broken links are bugs.
 
 ### File Manifest
 
@@ -83,7 +97,7 @@ PLAN → ARCHITECT → IMPLEMENT → REVIEW → DONE
 
 The system prompt tells the agent: *"If status is `[PLAN]`, do the planning work and advance to `[ARCHITECT]`. If `[ARCHITECT]`, do the architecture work and advance to `[IMPLEMENT]`."* And so on. One iteration, one phase of real work, one transition.
 
-For **node** cards (cards with `@-children`), the lifecycle is simpler:
+For **node** cards (cards with `children:` in frontmatter), the lifecycle is simpler:
 
 ```
 PLAN → DONE
@@ -260,10 +274,10 @@ The LLM signals "no operation" by returning the card file unchanged. The wrapper
 
 ## Project Structure
 
-PLANAR enforces a mandatory top-level directory layout:
+PLANAR expects `plan/` and `src/` at the **repository root**:
 
 ```
-project/
+repo/
 ├── plan/           ← card files live here (the system of record)
 │   ├── root.md
 │   ├── 1-project-structure.md
@@ -279,7 +293,9 @@ project/
 │   │   ├── README.md
 │   │   └── ARCHITECTURE.md
 │   └── ...
-└── src/            ← implementation code
+├── src/            ← implementation code
+├── README.md
+└── CLAUDE.md
 ```
 
 Card file naming follows the dot-path convention (`{dot-path}-{slug}.md`), making sibling discovery trivial — an agent can glob `plan/2.*` to find all cards in its domain.
@@ -294,6 +310,99 @@ Every hierarchical node that represents a domain must establish and maintain sta
 - **`ARCHITECTURE.md`** — key design decisions, component relationships, and interface contracts
 
 These artifacts are created during the `[ARCHITECT]` phase and are **living documents** — updated by any iteration that touches the domain. They serve as the institutional memory that survives across the fresh-context invocations of the Ralph Wiggum pattern.
+
+## Working Directory
+
+PLANAR operates on a **target project directory** — the repo where the actual work happens. This is distinct from PLANAR's own installation directory. The target directory is where `plan/`, `docs/`, and `src/` live.
+
+```bash
+planar --cwd /path/to/my-project plan/root.md       # explicit target
+planar plan/root.md                                   # defaults to cwd
+```
+
+The `--cwd` flag sets the working directory for the entire PLANAR session. All card paths, file manifests, and Claude Code invocations resolve relative to this directory. If omitted, PLANAR uses the current working directory.
+
+This means PLANAR can be installed globally (or in its own repo) and pointed at any project:
+
+```bash
+# PLANAR lives in ~/tools/planar, but operates on ~/work/my-app
+cd ~/work/my-app
+planar orchestrate plan/root.md
+
+# Or equivalently:
+planar --cwd ~/work/my-app orchestrate plan/root.md
+```
+
+The target directory must contain at least a `plan/` directory with a root card. PLANAR will create `docs/` subdirectories as needed during `[ARCHITECT]` phases.
+
+## Git Watch Mode
+
+When PLANAR operates on a git repository with collaborators, external changes can land at any time — merges, force-pushes, CI-driven commits. If the plan doesn't react to these changes, cards drift out of sync with the codebase and agents make decisions based on stale assumptions.
+
+**Git watch mode** solves this by running a background loop that monitors the upstream branch and feeds external changes back into the plan as first-class cards.
+
+```bash
+planar watch [plan-dir]                # watch the current branch
+planar watch --interval 60 [plan-dir]  # poll every 60 seconds (default: 30s)
+planar watch --branch main [plan-dir]  # watch a specific branch
+```
+
+### How It Works
+
+```
+┌──────────────────────────────────────┐
+│          Git Watch Loop              │
+│                                      │
+│  every <interval>:                   │
+│    git fetch origin                  │
+│    if behind:                        │
+│      diff = git diff HEAD..origin/X  │
+│      git pull --ff-only              │
+│      analyze diff                    │
+│      create impact card              │
+│      invalidate affected cards       │
+│                                      │
+└──────────────────────────────────────┘
+```
+
+1. **Fetch** — `git fetch origin` to check for upstream changes without modifying the working tree.
+
+2. **Detect** — Compare `HEAD` against the tracking branch. If not behind, do nothing.
+
+3. **Diff** — Capture the full diff (`git diff HEAD..origin/<branch>`) and the list of changed files before pulling.
+
+4. **Pull** — `git pull --ff-only` to integrate. If fast-forward fails (diverged history), the watch logs a warning and skips — the human needs to resolve the merge.
+
+5. **Analyze** — Cross-reference the changed files against every card's **file manifest**. Any card whose manifest overlaps with the diff is a candidate for invalidation.
+
+6. **Create impact card** — Generate a new card (e.g., `plan/0.N-upstream-sync.md`) that documents:
+   - The commit range that was pulled
+   - The files that changed
+   - Which existing cards are affected (by manifest overlap)
+   - A summary of what changed (generated by diffstat, not by LLM — keep the watcher dumb)
+
+7. **Invalidate** — For each affected card that is past `[PLAN]` phase:
+   - If in `[ARCHITECT]` or later, regress to `[PLAN]` with a content note: *"Upstream changes in [files] may affect this card's assumptions. Re-evaluate."*
+   - If `[DONE]`, regress to `[REVIEW]` — the implementation may still be valid, but it needs verification against the new code.
+   - If in `[PLAN]`, leave it alone — planning hasn't committed to anything yet.
+
+### Design Principles
+
+- **The watcher is dumb.** It does not reason about whether changes are breaking. It mechanically matches changed files to manifests and creates cards. The LLM decides what to do about it during the next iteration.
+
+- **Impact cards are first-class.** They enter the plan like any other card and go through the normal lifecycle. An agent will pick up the impact card, assess the damage, and either resolve it or decompose it further.
+
+- **No silent invalidation.** Every regression includes a content change (the upstream diff summary), satisfying the Challenge rules. The agent seeing the regressed card knows *why* it was regressed and can make an informed decision.
+
+- **Fast-forward only.** The watcher never resolves merge conflicts. If the local branch has diverged, it logs a warning and waits for human intervention. PLANAR agents should not be making merge decisions.
+
+### Interaction with the Orchestrator
+
+Git watch mode can run alongside the orchestrator. The orchestrator's normal cycle will pick up:
+- Newly created impact cards (they start in `[PLAN]`)
+- Regressed cards (they re-enter the eligible pool)
+
+The watcher and orchestrator coordinate through the filesystem — the watcher writes cards, the orchestrator reads them. No direct communication needed. This is the same "dumb wrapper" philosophy: coordination happens through the card files, not through in-process messaging.
 
 ## Project Status
 

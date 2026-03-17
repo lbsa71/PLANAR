@@ -13,7 +13,7 @@ export type SpecialStatus =
 /** Combined status type */
 export type CardStatus = LeafPhase | SpecialStatus;
 
-/** Parsed @-references from a card */
+/** Card links parsed from YAML frontmatter */
 export interface CardReferences {
   parent: string | null;
   root: string | null;
@@ -29,7 +29,7 @@ export interface Card {
   title: string;
   /** Current phase/status */
   status: CardStatus;
-  /** @-references */
+  /** Card links from YAML frontmatter */
   refs: CardReferences;
   /** Whether this card is a node (has children) */
   isNode: boolean;

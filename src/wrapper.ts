@@ -98,7 +98,7 @@ export async function runCardLoop(
     const refErrors = checkReferenceIntegrity(card, allCards);
     if (refErrors.length > 0) {
       console.error(
-        `[${card.dotPath}] Reference integrity errors:\n  ${refErrors.join("\n  ")}`
+        `[${card.dotPath}] Link integrity errors:\n  ${refErrors.join("\n  ")}`
       );
       break;
     }

@@ -3,6 +3,7 @@ import {
   parseStatus,
   parseHeading,
   parseReferences,
+  parseFrontmatter,
   parseFileManifest,
   parseCard,
   updateCardStatus,
@@ -63,17 +64,69 @@ describe("parseHeading", () => {
   });
 });
 
-describe("parseReferences", () => {
-  it("parses all reference types", () => {
-    const content = `# 2.1 Parser [PLAN]
+describe("parseFrontmatter", () => {
+  it("parses scalar values", () => {
+    const content = `---
+parent: plan/2-core.md
+root: plan/root.md
+---
+# 2.1 Parser [PLAN]
+`;
+    const fm = parseFrontmatter(content);
+    expect(fm.parent).toBe("plan/2-core.md");
+    expect(fm.root).toBe("plan/root.md");
+  });
 
-@-parent: plan/2-core-engine.md
-@-root: plan/root.md
-@-children:
+  it("parses list values", () => {
+    const content = `---
+children:
   - plan/2.1.1-tokenizer.md
   - plan/2.1.2-ast-builder.md
-@-blocked-by:
+blocked-by:
   - plan/1.2-build-system.md
+---
+# 2.1 Parser [PLAN]
+`;
+    const fm = parseFrontmatter(content);
+    expect(fm.children).toEqual([
+      "plan/2.1.1-tokenizer.md",
+      "plan/2.1.2-ast-builder.md",
+    ]);
+    expect(fm["blocked-by"]).toEqual(["plan/1.2-build-system.md"]);
+  });
+
+  it("returns empty object for no frontmatter", () => {
+    expect(parseFrontmatter("# 1 Root [PLAN]\n")).toEqual({});
+  });
+
+  it("handles mixed scalar and list values", () => {
+    const content = `---
+parent: plan/2-core.md
+root: plan/root.md
+children:
+  - plan/2.1.1-foo.md
+---
+# Card
+`;
+    const fm = parseFrontmatter(content);
+    expect(fm.parent).toBe("plan/2-core.md");
+    expect(fm.root).toBe("plan/root.md");
+    expect(fm.children).toEqual(["plan/2.1.1-foo.md"]);
+  });
+});
+
+describe("parseReferences", () => {
+  it("parses all reference types from frontmatter", () => {
+    const content = `---
+parent: plan/2-core-engine.md
+root: plan/root.md
+children:
+  - plan/2.1.1-tokenizer.md
+  - plan/2.1.2-ast-builder.md
+blocked-by:
+  - plan/1.2-build-system.md
+---
+# 2.1 Parser [PLAN]
 
 ## Description
 `;
@@ -87,10 +140,23 @@ describe("parseReferences", () => {
     expect(refs.blockedBy).toEqual(["plan/1.2-build-system.md"]);
   });
 
-  it("handles missing references", () => {
+  it("handles missing frontmatter", () => {
     const refs = parseReferences("# 1 Root [PLAN]\n\n## Description\n");
     expect(refs.parent).toBeNull();
     expect(refs.root).toBeNull();
+    expect(refs.children).toEqual([]);
+    expect(refs.blockedBy).toEqual([]);
+  });
+
+  it("handles partial frontmatter", () => {
+    const content = `---
+root: plan/root.md
+---
+# 1 Root [PLAN]
+`;
+    const refs = parseReferences(content);
+    expect(refs.root).toBe("plan/root.md");
+    expect(refs.parent).toBeNull();
     expect(refs.children).toEqual([]);
     expect(refs.blockedBy).toEqual([]);
   });
@@ -117,13 +183,14 @@ Files of interest:
 });
 
 describe("parseCard", () => {
-  it("parses a complete card", () => {
-    const content = `# 2.1 Plan Parser [ARCHITECT]
-
-@-parent: plan/2-core-engine.md
-@-root: plan/root.md
-@-children:
+  it("parses a complete card with frontmatter", () => {
+    const content = `---
+parent: plan/2-core-engine.md
+root: plan/root.md
+children:
   - plan/2.1.1-tokenizer.md
+---
+# 2.1 Plan Parser [ARCHITECT]
 
 ## Description
 Parse plan files.
@@ -137,20 +204,34 @@ Parse plan files.
     expect(card.status).toBe("ARCHITECT");
     expect(card.isNode).toBe(true);
     expect(card.refs.children).toHaveLength(1);
+    expect(card.refs.parent).toBe("plan/2-core-engine.md");
     expect(card.fileManifest).toEqual(["src/parser/index.ts"]);
   });
 
-  it("identifies leaf cards", () => {
-    const content = `# 2.1.1 Tokenizer [PLAN]
-
-@-parent: plan/2.1-parser.md
-@-root: plan/root.md
+  it("identifies leaf cards (no children in frontmatter)", () => {
+    const content = `---
+parent: plan/2.1-parser.md
+root: plan/root.md
+---
+# 2.1.1 Tokenizer [PLAN]
 
 ## Description
 Tokenize input.
 `;
     const card = parseCard("plan/2.1.1-tokenizer.md", content);
     expect(card.isNode).toBe(false);
+  });
+
+  it("parses cards without frontmatter", () => {
+    const content = `# 1 Root [PLAN]
+
+## Description
+Root card.
+`;
+    const card = parseCard("plan/root.md", content);
+    expect(card.dotPath).toBe("1");
+    expect(card.isNode).toBe(false);
+    expect(card.refs.parent).toBeNull();
   });
 });
 
@@ -186,6 +267,20 @@ describe("updateCardStatus", () => {
     });
     expect(updated).toContain("[CONFLICTS-WITH 2.3]");
     expect(updated).not.toContain("[ARCHITECT]");
+  });
+
+  it("preserves frontmatter when updating status", () => {
+    const content = `---
+parent: plan/2-core.md
+root: plan/root.md
+---
+# 2.1 Parser [PLAN]
+
+## Description
+`;
+    const updated = updateCardStatus(content, "ARCHITECT");
+    expect(updated).toContain("parent: plan/2-core.md");
+    expect(updated).toContain("[ARCHITECT]");
   });
 });
 

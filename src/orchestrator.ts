@@ -357,7 +357,7 @@ export class Orchestrator {
       const errors = checkReferenceIntegrity(card, cards);
       if (errors.length > 0) {
         console.warn(
-          `[orchestrator] Reference integrity issues in ${card.dotPath}:\n  ${errors.join("\n  ")}`
+          `[orchestrator] Link integrity issues in ${card.dotPath}:\n  ${errors.join("\n  ")}`
         );
       }
     }

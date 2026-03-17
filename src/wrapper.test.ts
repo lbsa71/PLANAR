@@ -55,52 +55,58 @@ function makeDeps(
   return { deps, files };
 }
 
-const CARD_PLAN = `# 2.1 Plan Parser [PLAN]
-
-@-root: plan/root.md
-
-## Description
-Parse plan files.
-`;
-
-const CARD_DONE = `# 2.1 Plan Parser [DONE]
-
-@-root: plan/root.md
+const CARD_PLAN = `---
+root: plan/root.md
+---
+# 2.1 Plan Parser [PLAN]
 
 ## Description
 Parse plan files.
 `;
 
-const CARD_BLOCKED = `# 2.1 Plan Parser [BLOCKED-BY 1.2]
-
-@-root: plan/root.md
+const CARD_DONE = `---
+root: plan/root.md
+---
+# 2.1 Plan Parser [DONE]
 
 ## Description
 Parse plan files.
 `;
 
-const ROOT_CARD = `# 0 Root [PLAN]
+const CARD_BLOCKED = `---
+root: plan/root.md
+---
+# 2.1 Plan Parser [BLOCKED-BY 1.2]
 
-@-root: plan/root.md
+## Description
+Parse plan files.
+`;
+
+const ROOT_CARD = `---
+root: plan/root.md
+---
+# 0 Root [PLAN]
 
 ## Description
 Root plan.
 `;
 
-const CARD_WITH_PARENT = `# 2.1 Plan Parser [PLAN]
-
-@-parent: plan/2-core.md
-@-root: plan/root.md
+const CARD_WITH_PARENT = `---
+parent: plan/2-core.md
+root: plan/root.md
+---
+# 2.1 Plan Parser [PLAN]
 
 ## Description
 Parse plan files.
 `;
 
-const PARENT_CARD = `# 2 Core [PLAN]
-
-@-root: plan/root.md
-@-children:
+const PARENT_CARD = `---
+root: plan/root.md
+children:
   - plan/2.1-parser.md
+---
+# 2 Core [PLAN]
 
 ## Description
 Core engine.
@@ -267,7 +273,7 @@ describe("runCardLoop", () => {
   it("aborts on reference integrity errors", async () => {
     const files: Record<string, string> = {
       "plan/root.md": ROOT_CARD,
-      // Note: plan/2-core.md is missing — broken @-parent ref
+      // Note: plan/2-core.md is missing — broken parent link
       "plan/2.1-parser.md": CARD_WITH_PARENT,
     };
 

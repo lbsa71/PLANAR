@@ -17,13 +17,17 @@ Usage:
   planar <card-file>              Run the Ralph Wiggum loop on a single card
   planar orchestrate <root-file>  Run full orchestration with parallel agents
   planar status [plan-dir]        Show status of all cards
+  planar watch [plan-dir]         Git watch mode — monitor upstream for changes
 
 Options:
+  --cwd <dir>              Set working directory (default: current directory)
   --max-iterations <n>     Max iterations per card (default: 50)
   --max-agents <n>         Max parallel agents (default: 8)
   --max-cost <dollars>     Max cost budget in dollars (default: unlimited)
   --plan-dir <dir>         Plan directory (default: plan)
   --root <file>            Root plan file (default: plan/root.md)
+  --interval <seconds>     Git watch poll interval (default: 30)
+  --branch <name>          Git watch branch to track
   --help                   Show this help message`);
 }
 
@@ -50,7 +54,7 @@ function parseArgs(args: string[]): {
         i++;
       }
     } else if (!command) {
-      if (arg === "orchestrate" || arg === "status") {
+      if (arg === "orchestrate" || arg === "status" || arg === "watch") {
         command = arg;
       } else {
         command = "run";
@@ -77,6 +81,13 @@ async function main(): Promise<void> {
   }
 
   const { command, target, options } = parseArgs(args);
+
+  // --cwd: change working directory before anything else
+  if (options["cwd"]) {
+    process.chdir(options["cwd"]);
+    console.log(`[planar] Working directory: ${options["cwd"]}`);
+  }
+
   const planDir = options["plan-dir"] ?? "plan";
   const rootFile = options["root"] ?? "plan/root.md";
   const maxIterations = parseInt(options["max-iterations"] ?? "50", 10);
@@ -181,7 +192,7 @@ async function main(): Promise<void> {
         }
       }
 
-      // Reference integrity check
+      // Link integrity check
       const allErrors: { dotPath: string; errors: string[] }[] = [];
       for (const card of cards) {
         const errors = checkReferenceIntegrity(card, cards);
@@ -190,7 +201,7 @@ async function main(): Promise<void> {
         }
       }
       if (allErrors.length > 0) {
-        console.log("\nReference integrity errors:");
+        console.log("\nLink integrity errors:");
         for (const { dotPath, errors } of allErrors) {
           for (const err of errors) {
             console.log(`  ${dotPath}: ${err}`);
@@ -205,6 +216,21 @@ async function main(): Promise<void> {
       console.log(
         `\n${done}/${cards.length} done — ${nodes} nodes, ${leaves} leaves`
       );
+      break;
+    }
+
+    case "watch": {
+      const dir = target || planDir;
+      const interval = parseInt(options["interval"] ?? "30", 10);
+      const branch = options["branch"];
+      console.log(
+        `[watch] Git watch mode on ${dir}/ — polling every ${interval}s` +
+          (branch ? ` (branch: ${branch})` : "")
+      );
+      console.error(
+        "[watch] Git watch mode is not yet implemented. See README.md for the spec."
+      );
+      process.exit(1);
       break;
     }
 

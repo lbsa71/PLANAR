@@ -22,20 +22,44 @@ Root plan file is: ${rootPlanFile}
 - Perform exactly ONE operation per iteration
 - Every iteration MUST begin by reading the card's file manifest and ALL referenced files
 - If you discover an error, create a new card for it and exit — don't fix silently
-- All @-references must remain valid — broken links are bugs
+- All card links in YAML frontmatter must remain valid — broken links are bugs
 - Discover sibling cards by scanning plan/ for files sharing your dot-path prefix (e.g. plan/${card.dotPath.split(".")[0]}.*)
 
 ## Challenging a Status
 Any status — including [DONE] — can be regressed to an earlier phase. But a challenge MUST satisfy BOTH conditions:
 1. Regress the phase (e.g. [DONE] → [PLAN])
 2. Change the card content (description, acceptance criteria, or constraints) to explain WHY
-Both are mandatory. If you regress without changing content, the next iteration will simply re-advance because nothing looks different.${manifestInstructions}`;
+Both are mandatory. If you regress without changing content, the next iteration will simply re-advance because nothing looks different.
+
+## Card File Format
+When creating or modifying card files, use this structure:
+\`\`\`
+---
+parent: plan/<parent-card>.md
+root: plan/root.md
+children:              # only if this card has sub-cards
+  - plan/<child>.md
+blocked-by:            # only if this card depends on others
+  - plan/<dep>.md
+---
+# <dot-path> <Title> [<STATUS>]
+
+## Description
+...
+
+## File Manifest
+- path/to/relevant/file.ts
+
+## Acceptance Criteria
+- ...
+\`\`\`
+Card links (parent, root, children, blocked-by) go in YAML frontmatter. The heading contains the dot-path, title, and status in brackets.${manifestInstructions}`;
 
   if (isNode) {
     return `${preamble}
 
 ## Node Card Rules
-This card is a NODE (it has @-children). Nodes are structural — about decomposition, not implementation.
+This card is a NODE (it has children: in its frontmatter). Nodes are structural — about decomposition, not implementation.
 Node lifecycle: PLAN → DONE
 A node is DONE when it has the right children with the right boundaries, regardless of children's status.
 
@@ -46,7 +70,7 @@ ${getNodeTaskPrompt(phase)}`;
   return `${preamble}
 
 ## Leaf Card Rules
-This card is a LEAF (no @-children). Leaves go through the full phase lifecycle.
+This card is a LEAF (no children: in frontmatter). Leaves go through the full phase lifecycle.
 Leaf lifecycle: PLAN → ARCHITECT → IMPLEMENT → REVIEW → DONE
 
 ## Current Phase: [${phase ?? formatSpecialStatus(card.status)}]

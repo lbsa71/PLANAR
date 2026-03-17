@@ -30,6 +30,15 @@ describe("generateSystemPrompt", () => {
     expect(prompt).toContain("BOTH conditions");
     expect(prompt).toContain("Regress the phase");
     expect(prompt).toContain("Change the card content");
+    expect(prompt).toContain("card links in YAML frontmatter must remain valid");
+  });
+
+  it("includes card file format instructions", () => {
+    const prompt = generateSystemPrompt(makeCard(), "plan/root.md");
+    expect(prompt).toContain("Card File Format");
+    expect(prompt).toContain("parent: plan/");
+    expect(prompt).toContain("root: plan/root.md");
+    expect(prompt).toContain("YAML frontmatter");
   });
 
   it("includes sibling discovery instruction", () => {
@@ -107,6 +116,7 @@ describe("generateSystemPrompt", () => {
       "plan/root.md"
     );
     expect(prompt).toContain("NODE");
+    expect(prompt).toContain("children: in its frontmatter");
     expect(prompt).toContain("PLAN → DONE");
     expect(prompt).toContain("Decompose this node");
   });

@@ -63,39 +63,78 @@ export function parseHeading(heading: string): {
 }
 
 /**
- * Parse @-references from card content.
+ * Parse YAML frontmatter from card content.
+ * Frontmatter is delimited by `---` lines at the start of the file.
+ */
+export function parseFrontmatter(content: string): Record<string, unknown> {
+  const match = content.match(/^---\s*\n([\s\S]*?)\n---/);
+  if (!match) return {};
+
+  const yaml = match[1];
+  const result: Record<string, unknown> = {};
+
+  let currentKey: string | null = null;
+  let currentList: string[] | null = null;
+
+  for (const line of yaml.split("\n")) {
+    // List item under current key
+    const listItem = line.match(/^\s+-\s+(.+)/);
+    if (listItem && currentKey) {
+      if (!currentList) currentList = [];
+      currentList.push(listItem[1].trim());
+      continue;
+    }
+
+    // Flush any pending list
+    if (currentKey && currentList) {
+      result[currentKey] = currentList;
+      currentList = null;
+      currentKey = null;
+    }
+
+    // Key: value pair
+    const kvMatch = line.match(/^([\w-]+):\s*(.*)/);
+    if (kvMatch) {
+      const key = kvMatch[1];
+      const val = kvMatch[2].trim();
+      if (val) {
+        result[key] = val;
+        currentKey = null;
+      } else {
+        // Value will be a list on subsequent lines
+        currentKey = key;
+        currentList = [];
+      }
+    }
+  }
+
+  // Flush final pending list
+  if (currentKey && currentList) {
+    result[currentKey] = currentList;
+  }
+
+  return result;
+}
+
+/**
+ * Parse card links (parent, root, children, blocked-by) from YAML frontmatter.
  */
 export function parseReferences(content: string): CardReferences {
-  const refs: CardReferences = {
-    parent: null,
-    root: null,
-    children: [],
-    blockedBy: [],
+  const fm = parseFrontmatter(content);
+
+  return {
+    parent: typeof fm.parent === "string" ? fm.parent : null,
+    root: typeof fm.root === "string" ? fm.root : null,
+    children: Array.isArray(fm.children) ? fm.children : [],
+    blockedBy: Array.isArray(fm["blocked-by"]) ? fm["blocked-by"] : [],
   };
+}
 
-  const parentMatch = content.match(/@-parent:\s*(.+)/);
-  if (parentMatch) refs.parent = parentMatch[1].trim();
-
-  const rootMatch = content.match(/@-root:\s*(.+)/);
-  if (rootMatch) refs.root = rootMatch[1].trim();
-
-  const childrenMatch = content.match(/@-children:\s*\n((?:\s*-\s*.+\n?)*)/);
-  if (childrenMatch) {
-    refs.children = childrenMatch[1]
-      .split("\n")
-      .map((line) => line.replace(/^\s*-\s*/, "").trim())
-      .filter(Boolean);
-  }
-
-  const blockedMatch = content.match(/@-blocked-by:\s*\n((?:\s*-\s*.+\n?)*)/);
-  if (blockedMatch) {
-    refs.blockedBy = blockedMatch[1]
-      .split("\n")
-      .map((line) => line.replace(/^\s*-\s*/, "").trim())
-      .filter(Boolean);
-  }
-
-  return refs;
+/**
+ * Strip frontmatter from content, returning just the markdown body.
+ */
+export function stripFrontmatter(content: string): string {
+  return content.replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, "");
 }
 
 /**
@@ -125,7 +164,9 @@ export function parseCard(
 ): Card {
   const raw = content ?? (injectedFs ?? nodeFs).readFileSync(filePath, "utf-8");
 
-  const headingMatch = raw.match(/^(#\s+.+)$/m);
+  // Strip frontmatter before heading search to avoid matching YAML comments
+  const body = stripFrontmatter(raw);
+  const headingMatch = body.match(/^(#\s+.+)$/m);
   if (!headingMatch) {
     throw new Error(`No heading found in ${filePath}`);
   }
@@ -232,30 +273,38 @@ export function findSiblings(
 /**
  * Check reference integrity for a card against all known cards.
  */
+/** Normalize path separators to forward slashes for cross-platform comparison */
+function normalizePath(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
 export function checkReferenceIntegrity(
   card: Card,
   allCards: Card[]
 ): string[] {
   const errors: string[] = [];
 
+  const matchesRef = (filePath: string, ref: string) =>
+    normalizePath(filePath).endsWith(normalizePath(ref));
+
   if (card.refs.parent) {
-    const resolved = allCards.find((c) => c.filePath.endsWith(card.refs.parent!));
+    const resolved = allCards.find((c) => matchesRef(c.filePath, card.refs.parent!));
     if (!resolved) {
-      errors.push(`Broken @-parent reference: ${card.refs.parent}`);
+      errors.push(`Broken parent link: ${card.refs.parent}`);
     }
   }
 
   for (const child of card.refs.children) {
-    const resolved = allCards.find((c) => c.filePath.endsWith(child));
+    const resolved = allCards.find((c) => matchesRef(c.filePath, child));
     if (!resolved) {
-      errors.push(`Broken @-children reference: ${child}`);
+      errors.push(`Broken children link: ${child}`);
     }
   }
 
   for (const dep of card.refs.blockedBy) {
-    const resolved = allCards.find((c) => c.filePath.endsWith(dep));
+    const resolved = allCards.find((c) => matchesRef(c.filePath, dep));
     if (!resolved) {
-      errors.push(`Broken @-blocked-by reference: ${dep}`);
+      errors.push(`Broken blocked-by link: ${dep}`);
     }
   }
 
