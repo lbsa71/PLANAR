@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { FileSystem } from "./types.js";
 
-const MAX_LINES = 200;
+const MAX_LINES = 500;
 const DEFAULT_LOG_FILE = "debug.log";
 
 /** Default fs for debug logging */

@@ -6,7 +6,7 @@ children:
   - plan/5.2-impact-analysis.md
   - plan/5.3-card-invalidation.md
 ---
-# 5 Git Watch Mode [PLAN]
+# 5 Git Watch Mode [DONE]
 
 ## Description
 Background loop that monitors the upstream git branch for changes, creates

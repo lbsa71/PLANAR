@@ -28,16 +28,16 @@ describe("debugLog", () => {
     expect(getContent()).toMatch(/\[\d{4}-\d{2}-\d{2}T/);
   });
 
-  it("caps at 200 lines", () => {
+  it("caps at 500 lines", () => {
     const { deps } = mockLogDeps();
-    for (let i = 0; i < 250; i++) {
+    for (let i = 0; i < 600; i++) {
       debugLog(`line ${i}`, "debug.log", deps);
     }
     const finalContent = deps.readFileSync("debug.log");
     const lines = finalContent.split("\n").filter(Boolean);
-    expect(lines.length).toBeLessThanOrEqual(200);
+    expect(lines.length).toBeLessThanOrEqual(500);
     // Should keep the most recent lines
-    expect(finalContent).toContain("line 249");
+    expect(finalContent).toContain("line 599");
     expect(finalContent).not.toContain("line 0\n");
   });
 });

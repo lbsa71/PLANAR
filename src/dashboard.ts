@@ -17,7 +17,8 @@ export interface DashboardEvent {
  */
 export class Dashboard {
   private events: DashboardEvent[] = [];
-  private frame = 0;
+  /** Per-agent spinner frame — advances only when that agent emits an event */
+  private agentFrames: Map<string, number> = new Map();
   private startedAt = new Date();
   private totalCost = 0;
   private enabled: boolean;
@@ -26,11 +27,16 @@ export class Dashboard {
     this.enabled = enabled && process.stdout.isTTY === true;
   }
 
-  /** Add a log event to the feed */
+  /** Add a log event to the feed and advance that agent's spinner */
   log(dotPath: string, message: string): void {
     this.events.push({ timestamp: new Date(), dotPath, message });
     if (this.events.length > MAX_LOG_LINES * 2) {
       this.events = this.events.slice(-MAX_LOG_LINES);
+    }
+    // Advance spinner for this agent
+    if (dotPath !== "*") {
+      const frame = this.agentFrames.get(dotPath) ?? 0;
+      this.agentFrames.set(dotPath, frame + 1);
     }
   }
 
@@ -47,21 +53,21 @@ export class Dashboard {
   ): void {
     if (!this.enabled) return;
 
-    this.frame++;
-    const spinner = SPINNER[this.frame % SPINNER.length];
     const elapsed = formatElapsed(this.startedAt);
-
     const lines: string[] = [];
 
     // Header
     lines.push("");
     lines.push(
-      `${bold("PLANAR")} ${spinner}  ${dim(`elapsed: ${elapsed}  cost: $${this.totalCost.toFixed(2)}`)}`
+      `${bold("PLANAR")}  ${dim(`elapsed: ${elapsed}  cost: $${this.totalCost.toFixed(2)}`)}`
     );
     lines.push(dim("─".repeat(76)));
 
-    // Card tree
-    const sorted = [...cards].sort((a, b) => compareDotPaths(a.dotPath, b.dotPath));
+    // Card tree — skip DONE cards
+    const sorted = [...cards]
+      .filter((c) => c.status !== "DONE")
+      .sort((a, b) => compareDotPaths(a.dotPath, b.dotPath));
+
     for (const card of sorted) {
       const depth = card.dotPath.split(".").length - 1;
       const indent = "  ".repeat(depth);
@@ -75,12 +81,11 @@ export class Dashboard {
       let line = `${indent}${card.dotPath.padEnd(8 - depth * 2)}`;
 
       if (agent) {
-        // Active agent — highlight
+        const agentFrame = this.agentFrames.get(card.dotPath) ?? 0;
+        const spinner = SPINNER[agentFrame % SPINNER.length];
         const agentElapsed = formatElapsed(agent.startedAt);
         line += `  ${yellow(`[${statusStr}]`.padEnd(18))}`;
-        line += `  ${green(spinner)} ${dim(`running ${agentElapsed}  iter #${iters}`)}`;
-      } else if (card.status === "DONE") {
-        line += `  ${dim(`[${statusStr}]`.padEnd(18))}  ${dim("✓")}`;
+        line += `  ${green(spinner)} ${dim(`${agentElapsed}  iter #${iters}`)}`;
       } else if (!isPhase(card.status)) {
         line += `  ${red(`[${statusStr}]`.padEnd(18))}`;
       } else {
@@ -92,6 +97,10 @@ export class Dashboard {
 
       line += `  ${card.title}`;
       lines.push(line);
+    }
+
+    if (sorted.length === 0) {
+      lines.push(dim("  (all cards done)"));
     }
 
     // Summary bar
@@ -123,7 +132,7 @@ export class Dashboard {
     }
     lines.push("");
 
-    // Write to terminal — clear screen and move cursor to top
+    // Clear screen and draw
     process.stdout.write("\x1B[2J\x1B[H");
     process.stdout.write(lines.join("\n"));
   }
@@ -131,7 +140,7 @@ export class Dashboard {
   /** Clean up — show cursor, reset terminal */
   cleanup(): void {
     if (!this.enabled) return;
-    process.stdout.write("\x1B[?25h"); // show cursor
+    process.stdout.write("\x1B[?25h");
   }
 }
 

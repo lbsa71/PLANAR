@@ -62,6 +62,8 @@ export class Orchestrator {
   private processes: Map<string, ProcessHandle> = new Map();
   private completionPromises: Map<string, Promise<string>> = new Map();
   private iterationCounts: Map<string, number> = new Map();
+  /** Consecutive error count per card — for backoff */
+  private errorCounts: Map<string, number> = new Map();
   private dashboard: Dashboard;
 
   constructor(
@@ -121,7 +123,12 @@ export class Orchestrator {
 
       if (this.completionPromises.size > 0) {
         // Start a render tick so the dashboard stays alive while agents run
+        let tick = 0;
         const renderInterval = setInterval(() => {
+          tick++;
+          if (tick % 5 === 0) {
+            debugLog(`[heartbeat] tick=${tick} active=${this.activeAgents.size} promises=${this.completionPromises.size}`);
+          }
           const freshCards = discoverCards(this.config.planDir, this.deps.fs);
           this.dashboard.render(freshCards, this.activeAgents, this.iterationCounts);
         }, 1000);
@@ -157,6 +164,10 @@ export class Orchestrator {
 
       if (this.isUnderActiveNode(card, cards)) continue;
       if (this.isBlocked(card, cards)) continue;
+
+      // Error backoff: skip if card has consecutive errors (max 3 retries)
+      const errors = this.errorCounts.get(card.dotPath) ?? 0;
+      if (errors >= 3) continue;
 
       eligible.push(card);
     }
@@ -197,7 +208,14 @@ export class Orchestrator {
    * Uses --output-format stream-json to get real-time events.
    */
   private spawnAgent(card: Card): void {
-    const sessionId = dotPathToGuid(card.dotPath);
+    // Use a fresh session ID each invocation to avoid "session already in use"
+    const iterNum = this.iterationCounts.get(card.dotPath) ?? 0;
+    const baseGuid = dotPathToGuid(card.dotPath);
+    // Embed iteration in the last segment of the GUID
+    const sessionId = baseGuid.replace(
+      /0{4}$/,
+      iterNum.toString(16).padStart(4, "0")
+    );
     const systemPrompt = generateSystemPrompt(card, this.config.rootPlanFile);
 
     const prompt = `@${card.filePath} @${this.config.rootPlanFile}\n\nDo the next thing for this card. Perform exactly one operation, update the card file, and exit.`;
@@ -224,7 +242,7 @@ export class Orchestrator {
       `Spawning agent for ${card.dotPath} — ${claudePath} ${spawnArgs.slice(0, 4).join(" ")} ...`
     );
     const proc = this.deps.spawner.spawn(claudePath, spawnArgs, {
-      stdio: "pipe",
+      stdio: ["ignore", "pipe", "pipe"],
     });
 
     const slot: AgentSlot = {
@@ -241,16 +259,23 @@ export class Orchestrator {
     const count = this.iterationCounts.get(card.dotPath) ?? 0;
     this.iterationCounts.set(card.dotPath, count + 1);
 
+    debugLog(`[${card.dotPath}] pid=${proc.pid} stdout=${!!proc.stdout} stderr=${!!proc.stderr}`);
+
     // Stream-json: parse newline-delimited JSON events as they arrive
     let stdoutBuffer = "";
     let stderr = "";
 
     proc.stdout?.on("data", (data: Buffer) => {
-      stdoutBuffer += data.toString();
+      const chunk = data.toString();
+      debugLog(`[${card.dotPath}] stdout chunk (${chunk.length} bytes): ${chunk.slice(0, 200)}`);
+      stdoutBuffer += chunk;
       const { events, remainder } = parseStreamChunk(stdoutBuffer);
       stdoutBuffer = remainder;
 
+      debugLog(`[${card.dotPath}] Parsed ${events.length} events, remainder: ${remainder.length} bytes`);
+
       for (const event of events) {
+        debugLog(`[${card.dotPath}] Event: type=${event.type} subtype=${event.subtype ?? ""}`);
         const summary = summarizeEvent(event);
         if (summary) {
           this.dashboard.log(card.dotPath, summary);
@@ -270,13 +295,22 @@ export class Orchestrator {
     });
 
     proc.stderr?.on("data", (data: Buffer) => {
-      stderr += data.toString();
+      const chunk = data.toString();
+      debugLog(`[${card.dotPath}] stderr chunk: ${chunk.slice(0, 200)}`);
+      stderr += chunk;
     });
 
     const completionPromise = new Promise<string>((resolve) => {
       proc.on("close", (code) => {
         debugLog(`Agent ${card.dotPath} exited with code ${code}`);
         if (code !== 0) {
+          // Track consecutive errors for backoff
+          const prevErrors = this.errorCounts.get(card.dotPath) ?? 0;
+          this.errorCounts.set(card.dotPath, prevErrors + 1);
+          this.dashboard.log(
+            card.dotPath,
+            `Error (exit ${code}) — ${prevErrors + 1} consecutive failures`
+          );
           debugLogProcessError({
             dotPath: card.dotPath,
             command: claudePath,
@@ -286,6 +320,9 @@ export class Orchestrator {
             stderr,
             exitCode: code,
           });
+        } else {
+          // Reset error count on success
+          this.errorCounts.set(card.dotPath, 0);
         }
         if (stderr) {
           debugLog(`[${card.dotPath}] stderr: ${stderr.slice(-500)}`);
