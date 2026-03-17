@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { runCardLoop } from "./wrapper.js";
 import { Orchestrator } from "./orchestrator.js";
 import {
@@ -8,8 +12,32 @@ import {
   formatStatus,
   checkReferenceIntegrity,
 } from "./card.js";
+import { fetchDetectPull } from "./git-ops.js";
+import { findAffectedCards, createImpactCard } from "./impact.js";
+import { invalidateCards } from "./invalidation.js";
 import { debugLogBanner } from "./debug-log.js";
-import type { CardStatus } from "./types.js";
+import type { CardStatus, GitRunner, FileSystem } from "./types.js";
+
+const execFileAsync = promisify(execFile);
+
+const nodeFs: FileSystem = {
+  readFileSync: (p, enc) => fs.readFileSync(p, enc),
+  writeFileSync: (p, c) => fs.writeFileSync(p, c),
+  existsSync: (p) => fs.existsSync(p),
+  readdirSync: (p) => fs.readdirSync(p) as string[],
+};
+
+function makeGitRunner(cwd?: string): GitRunner {
+  return {
+    async run(args: string[]): Promise<string> {
+      const { stdout } = await execFileAsync("git", args, {
+        cwd,
+        maxBuffer: 10 * 1024 * 1024,
+      });
+      return stdout;
+    },
+  };
+}
 
 function printUsage(): void {
   console.log(`PLANAR — Plan-Level Adaptive Narrowing And Refinement
@@ -240,16 +268,141 @@ async function main(): Promise<void> {
 
     case "watch": {
       const dir = target || planDir;
+      const resolvedDir = path.resolve(dir);
       const interval = parseInt(options["interval"] ?? "30", 10);
       const branch = options["branch"];
+
+      // Resolve the git repo root from the plan directory
+      const { stdout: repoRoot } = await execFileAsync("git", [
+        "-C",
+        resolvedDir,
+        "rev-parse",
+        "--show-toplevel",
+      ]);
+      const repoCwd = repoRoot.trim();
+
       console.log(
-        `[watch] Git watch mode on ${dir}/ — polling every ${interval}s` +
+        `[watch] Git watch mode on ${dir}/ (repo: ${repoCwd}) — polling every ${interval}s` +
           (branch ? ` (branch: ${branch})` : "")
       );
-      console.error(
-        "[watch] Git watch mode is not yet implemented. See README.md for the spec."
-      );
-      process.exit(1);
+
+      const git = makeGitRunner(repoCwd);
+      let running = true;
+
+      const shutdown = () => {
+        console.log("\n[watch] Shutting down...");
+        running = false;
+      };
+      process.on("SIGINT", shutdown);
+      process.on("SIGTERM", shutdown);
+
+      while (running) {
+        try {
+          const result = await fetchDetectPull(git, branch);
+
+          switch (result.status) {
+            case "up-to-date":
+              // silent
+              break;
+
+            case "diverged":
+              console.warn(`[watch] ${result.warning}`);
+              break;
+
+            case "pulled": {
+              console.log(
+                `[watch] Pulled upstream changes — ${result.changedFiles.length} file(s) changed`
+              );
+
+              const affected = findAffectedCards(
+                result.changedFiles,
+                dir,
+                nodeFs
+              );
+
+              if (affected.length === 0) {
+                console.log("[watch] No cards affected by upstream changes.");
+                break;
+              }
+
+              // Get commit range and diffstat for the impact card
+              const localHead = (
+                await git.run(["rev-parse", "HEAD"])
+              ).trim();
+              const diffstat = (
+                await git.run([
+                  "diff",
+                  "--stat",
+                  `${localHead}~1..${localHead}`,
+                ])
+              ).trim();
+              const commitRange = `${localHead}~${result.changedFiles.length > 0 ? "1" : "0"}..${localHead}`;
+
+              const impactPath = createImpactCard(
+                commitRange,
+                result.changedFiles,
+                affected.map((c) => ({
+                  dotPath: c.dotPath,
+                  title: c.title,
+                  filePath: c.filePath,
+                })),
+                diffstat,
+                dir,
+                nodeFs
+              );
+              console.log(`[watch] Created impact card: ${impactPath}`);
+
+              const results = invalidateCards(
+                affected,
+                result.changedFiles,
+                nodeFs
+              );
+              const modified = results.filter((r) => r.modified);
+              if (modified.length > 0) {
+                console.log(
+                  `[watch] Invalidated ${modified.length} card(s):`
+                );
+                for (const r of modified) {
+                  console.log(
+                    `  ${r.dotPath}: ${r.previousStatus} → ${r.newStatus}`
+                  );
+                }
+              }
+
+              // Commit impact card + invalidated cards in the target repo
+              const changedCardPaths = [
+                impactPath,
+                ...modified.map((r) => r.filePath),
+              ];
+              try {
+                await git.run(["add", ...changedCardPaths]);
+                const cardList = modified
+                  .map((r) => `${r.dotPath} (${r.previousStatus}→${r.newStatus})`)
+                  .join(", ");
+                const msg = `chore(planar): upstream sync — ${modified.length} card(s) invalidated\n\n` +
+                  `Impact card: ${path.basename(impactPath)}\n` +
+                  `Invalidated: ${cardList || "none"}`;
+                await git.run(["commit", "-m", msg]);
+                console.log("[watch] Committed card changes to target repo.");
+              } catch (commitErr) {
+                console.error(
+                  `[watch] Failed to commit: ${commitErr instanceof Error ? commitErr.message : String(commitErr)}`
+                );
+              }
+              break;
+            }
+          }
+        } catch (err) {
+          console.error(
+            `[watch] Error during poll: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+
+        // Sleep for the interval, but check running flag every second
+        for (let s = 0; s < interval && running; s++) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      }
       break;
     }
 
