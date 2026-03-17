@@ -58,6 +58,10 @@ Files of interest (not ownership — multiple cards may reference the same file)
 - Returns structured tree
 ```
 
+### Malformed Cards
+
+If a card does not have the correct format — missing YAML frontmatter, missing heading with status tag, wrong section structure — the first operation on that card should be to **fix the format**. Add proper frontmatter (`parent`, `root`), ensure the heading follows `# <dot-path> <Title> [PLAN]` (defaulting to `[PLAN]`), and add any missing required sections (`## Description`, `## Acceptance Criteria`). Then **yield** — exit the iteration and let the next pass do the actual work. Never combine format repair with substantive changes; keep them as two separate iterations so the diff is clean and reviewable.
+
 The frontmatter fields are:
 
 | Field | Description |
@@ -260,6 +264,12 @@ All intelligence lives in the LLM invocation. The wrapper is just a delivery mec
 ### Why Burn Tokens?
 
 The one-operation-per-iteration constraint is deliberate. Each invocation gets a **fresh context** — no accumulated bias, no sunk-cost attachment to earlier decisions, no context window slowly filling with stale reasoning. Every iteration is a new pair of eyes on the plan. This is the core value proposition of the Ralph Wiggum pattern: you trade token cost for independence of perspective. A single long session drifts. A hundred short sessions converge.
+
+### Termination
+
+### No Actionable Cards
+
+When no cards are actionable — all are `[DONE]`, `[BLOCKED-BY]`, or `[INACTIONABLE]` — the wrapper does not immediately exit. Instead, it escapes into a **full codebase review**: read the entire codebase and compare it against the spec (acceptance criteria across all cards). If the review finds inconsistencies, revert the relevant card(s) back to `[PLAN]` with a content note explaining what was found, then yield. If the review finds no issues, exit the loop. This ensures the plan doesn't declare victory while the implementation has drifted from the spec.
 
 ### Termination
 

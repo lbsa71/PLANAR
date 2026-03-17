@@ -7,7 +7,7 @@ children:
   - plan/4-cli.md
   - plan/5-git-watch.md
 ---
-# 0 PLANAR [DONE]
+# 0 PLANAR [PLAN]
 
 ## Description
 Root plan for PLANAR — Plan-Level Adaptive Narrowing And Refinement.
