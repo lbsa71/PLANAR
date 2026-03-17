@@ -81,9 +81,18 @@ function getNodeTaskPrompt(phase: string | null): string {
   if (phase === "DONE") {
     return `This node is [DONE]. Review its children for correctness and completeness. If everything looks good, make no changes. If something needs adjustment, Challenge this card back to [PLAN] with a content change explaining why.`;
   }
-  return `Decompose this node into well-bounded children. Prefer splits that minimize cross-domain dependencies.
-Available operations: Split, Hierarchize, Move, Aggregate, Collapse, Annotate, Reorder, Prune.
-When decomposition is complete and children are well-defined, advance status to [DONE].`;
+  return `Re-evaluate this node and its ENTIRE subtree against the current spec.
+
+### Procedure
+1. Read this node's description and acceptance criteria
+2. Scan ALL descendant cards (not just direct children — walk the full tree)
+3. For each descendant, compare its description/acceptance criteria against the current spec
+4. If a descendant is [DONE] but its work no longer satisfies the spec, regress it to the appropriate phase (e.g. [PLAN]) and update its content to explain WHY (both are required per Challenge rules)
+5. If new children are needed, create them. If children are obsolete, prune them.
+6. Once all descendant statuses accurately reflect reality, advance this node to [DONE]
+
+Available structural operations: Split, Hierarchize, Move, Aggregate, Collapse, Annotate, Reorder, Prune.
+Prefer splits that minimize cross-domain dependencies.`;
 }
 
 function getLeafPhasePrompt(phase: LeafPhase | null): string {
