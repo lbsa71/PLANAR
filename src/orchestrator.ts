@@ -9,7 +9,6 @@ import {
   checkReferenceIntegrity,
 } from "./card.js";
 import { debugLog, debugLogProcessError } from "./debug-log.js";
-import { dotPathToGuid } from "./guid.js";
 import { resolveClaudePath } from "./resolve-claude.js";
 import { generateSystemPrompt } from "./system-prompt.js";
 import { Dashboard } from "./dashboard.js";
@@ -208,14 +207,7 @@ export class Orchestrator {
    * Uses --output-format stream-json to get real-time events.
    */
   private spawnAgent(card: Card): void {
-    // Use a fresh session ID each invocation to avoid "session already in use"
     const iterNum = this.iterationCounts.get(card.dotPath) ?? 0;
-    const baseGuid = dotPathToGuid(card.dotPath);
-    // Embed iteration in the last segment of the GUID
-    const sessionId = baseGuid.replace(
-      /0{4}$/,
-      iterNum.toString(16).padStart(4, "0")
-    );
     const systemPrompt = generateSystemPrompt(card, this.config.rootPlanFile);
 
     const prompt = `@${card.filePath} @${this.config.rootPlanFile}\n\nDo the next thing for this card. Perform exactly one operation, update the card file, and exit.`;
@@ -226,8 +218,6 @@ export class Orchestrator {
       "--verbose",
       "--output-format",
       "stream-json",
-      "--session-id",
-      sessionId,
       "--system-prompt",
       systemPrompt,
       "--",
@@ -247,7 +237,6 @@ export class Orchestrator {
 
     const slot: AgentSlot = {
       dotPath: card.dotPath,
-      sessionId,
       cardFile: card.filePath,
       pid: proc.pid,
       startedAt: new Date(),
@@ -256,8 +245,7 @@ export class Orchestrator {
     this.activeAgents.set(card.dotPath, slot);
     this.processes.set(card.dotPath, proc);
 
-    const count = this.iterationCounts.get(card.dotPath) ?? 0;
-    this.iterationCounts.set(card.dotPath, count + 1);
+    this.iterationCounts.set(card.dotPath, iterNum + 1);
 
     debugLog(`[${card.dotPath}] pid=${proc.pid} stdout=${!!proc.stdout} stderr=${!!proc.stderr}`);
 

@@ -58,7 +58,6 @@ export type PlanOperation =
 /** Orchestrator agent slot */
 export interface AgentSlot {
   dotPath: string;
-  sessionId: string;
   cardFile: string;
   pid: number;
   startedAt: Date;
