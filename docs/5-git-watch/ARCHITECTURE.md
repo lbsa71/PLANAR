@@ -93,6 +93,107 @@ Tests inject a `GitRunner` that records calls and returns scripted responses:
 - `src/types.ts` — `GitRunner`, `FetchResult` type exports (added to shared types)
 - `src/cli.ts` — watch command wiring (consumer)
 
+## 5.2 Impact Analysis & Card Creation — `src/impact.ts`
+
+### Overview
+
+After 5.1 pulls upstream changes, this module cross-references the changed files
+against every card's file manifest to identify affected cards, then writes an
+impact card documenting the results.
+
+### Interfaces
+
+```typescript
+export interface CreateImpactCardOptions {
+  commitRange: string;       // e.g. "abc1234..def5678"
+  changedFiles: string[];    // list of changed file paths
+  affectedCards: Card[];     // from findAffectedCards
+  diffstat: string;          // git diff --stat output
+  planDir: string;           // e.g. "plan"
+}
+```
+
+### Functions
+
+#### `findAffectedCards(changedFiles: string[], planDir: string, fs?: FileSystem): Card[]`
+
+1. Call `discoverCards(planDir, fs)` to get all cards.
+2. For each card, use its `fileManifest` property (already parsed by `parseCard`).
+3. Strip annotation suffixes from manifest entries (e.g. `src/card.ts (read — uses X)` → `src/card.ts`).
+4. Normalize both changed files and manifest paths: replace backslashes with
+   forward slashes, strip leading `./`.
+5. A card is "affected" if **any** of its normalized manifest paths matches
+   **any** normalized changed file (exact suffix match).
+6. Return the filtered list of affected `Card` objects.
+
+#### `createImpactCard(opts: CreateImpactCardOptions, fs?: FileSystem): string`
+
+1. Scan `planDir` for existing files matching `0.*-*.md` using `fs.readdirSync`.
+2. Parse dot-paths from filenames, find max N among `0.N` patterns, set next N = max + 1 (or 1 if none).
+3. Build card content:
+   - YAML frontmatter: `parent: plan/root.md`, `root: plan/root.md`
+   - Heading: `# 0.N Upstream Sync [PLAN]`
+   - Description with commit range
+   - Changed files list (bulleted markdown)
+   - Affected cards list (bulleted, each as `dot-path Title`)
+   - Diffstat section (fenced code block)
+4. Write to `{planDir}/0.{N}-upstream-sync.md` via `fs.writeFileSync`.
+5. Return the file path of the created card.
+
+### Path Normalization
+
+Local helpers:
+
+```typescript
+/** Normalize separators and strip leading ./ */
+function normalizePath(p: string): string {
+  return p.replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+/** Strip trailing annotation from manifest entries: "src/foo.ts (read — uses X)" → "src/foo.ts" */
+function stripManifestAnnotation(entry: string): string {
+  return entry.replace(/\s*\(.*\)\s*$/, "").trim();
+}
+```
+
+### Matching Rule
+
+A changed file matches a manifest entry when either:
+- The normalized changed path equals the normalized manifest path, OR
+- The normalized changed path ends with `/` + the normalized manifest path
+  (handles absolute vs relative)
+
+### Dependency Injection
+
+Both functions accept an optional `FileSystem` parameter (from `types.ts`).
+`findAffectedCards` passes it through to `discoverCards`.
+`createImpactCard` uses it for `readdirSync` and `writeFileSync`.
+
+### Test Strategy (`impact.test.ts`)
+
+All tests use an in-memory `FileSystem` mock.
+
+| Scenario | Expected |
+|---|---|
+| Card manifest contains changed file | Card included in result |
+| Card manifest has no changed files | Card excluded |
+| Backslash paths in changed files | Normalized, still matches |
+| Manifest entry with annotation suffix | Annotation stripped, matches |
+| Empty changed files list | Empty result |
+| Card with no file manifest | Excluded |
+| `createImpactCard` with no existing 0.* | Creates `0.1-upstream-sync.md` |
+| `createImpactCard` with existing 0.1, 0.2 | Creates `0.3-upstream-sync.md` |
+| Impact card has valid YAML frontmatter | parent + root set to `plan/root.md` |
+| Impact card heading | Matches `# 0.N Upstream Sync [PLAN]` |
+| Impact card body | Contains commit range, files, cards, diffstat |
+
+### File Manifest
+
+- `src/impact.ts` — implementation
+- `src/impact.test.ts` — unit tests
+- `src/card.ts` (read-only) — `discoverCards`, `parseFileManifest`
+- `src/types.ts` (read-only) — `FileSystem`, `Card` types
+
 ## 5.3 Card Invalidation — `src/invalidation.ts`
 
 ### Overview

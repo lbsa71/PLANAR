@@ -129,3 +129,18 @@ export interface ProcessHandle {
 export interface ProcessSpawner {
   spawn(command: string, args: string[], options: object): ProcessHandle;
 }
+
+// ---------------------------------------------------------------------------
+// Git operations interfaces (5.1 Fetch, Detect & Pull)
+// ---------------------------------------------------------------------------
+
+/** Runs a git command and returns stdout. Throws on non-zero exit. */
+export interface GitRunner {
+  run(args: string[]): Promise<string>;
+}
+
+/** Discriminated union for fetchDetectPull outcomes */
+export type FetchResult =
+  | { status: "up-to-date" }
+  | { status: "pulled"; diff: string; changedFiles: string[] }
+  | { status: "diverged"; warning: string };
