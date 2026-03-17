@@ -49,7 +49,8 @@ export class Dashboard {
   render(
     cards: Card[],
     activeAgents: Map<string, AgentSlot>,
-    iterationCounts: Map<string, number>
+    iterationCounts: Map<string, number>,
+    draining = false
   ): void {
     if (!this.enabled) return;
 
@@ -58,8 +59,9 @@ export class Dashboard {
 
     // Header
     lines.push("");
+    const status = draining ? `  ${yellow("⏳ DRAINING")}` : "";
     lines.push(
-      `${bold("PLANAR")}  ${dim(`elapsed: ${elapsed}  cost: $${this.totalCost.toFixed(2)}`)}`
+      `${bold("PLANAR")}${status}  ${dim(`elapsed: ${elapsed}  cost: $${this.totalCost.toFixed(2)}`)}`
     );
     lines.push(dim("─".repeat(76)));
 

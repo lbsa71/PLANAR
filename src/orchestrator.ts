@@ -67,6 +67,11 @@ export class Orchestrator {
   /** Consecutive error count per card — for backoff */
   private errorCounts: Map<string, number> = new Map();
   private dashboard: Dashboard;
+  /** Soft shutdown: let running agents finish, don't spawn new ones */
+  private draining = false;
+  /** Track Ctrl-C presses for double-tap hard exit */
+  private lastCtrlC = 0;
+  private stdinCleanup: (() => void) | null = null;
 
   constructor(
     config: Partial<OrchestratorConfig> = {},
@@ -82,10 +87,12 @@ export class Orchestrator {
     this.config.planDir = path.dirname(this.config.rootPlanFile);
 
     this.initializeRootCard();
+    this.setupKeyboardHandler();
 
     this.dashboard.log("*", `Starting with root: ${this.config.rootPlanFile}`);
     this.dashboard.log("*", `Plan dir: ${this.config.planDir}`);
     this.dashboard.log("*", `Max parallel agents: ${this.config.maxParallelAgents}`);
+    this.dashboard.log("*", `Press ESC to drain (finish running, stop new). Ctrl-C twice to force quit.`);
 
     let staleCycles = 0;
     const maxStaleCycles = 3;
@@ -94,17 +101,23 @@ export class Orchestrator {
       const cards = discoverCards(this.config.planDir, this.deps.fs);
 
       // Render dashboard each cycle
-      this.dashboard.render(cards, this.activeAgents, this.iterationCounts);
+      this.dashboard.render(cards, this.activeAgents, this.iterationCounts, this.draining);
 
       if (cards.length > 0 && cards.every((c) => c.status === "DONE")) {
         this.dashboard.log("*", "All cards are DONE. Exiting.");
         break;
       }
 
+      // Soft shutdown: wait for active agents to finish, then exit
+      if (this.draining && this.activeAgents.size === 0) {
+        this.dashboard.log("*", "All agents drained. Exiting.");
+        break;
+      }
+
       this.propagateConflicts(cards);
       this.checkAllReferences(cards);
 
-      const eligible = this.findEligibleCards(cards);
+      const eligible = this.draining ? [] : this.findEligibleCards(cards);
 
       if (eligible.length === 0 && this.activeAgents.size === 0) {
         staleCycles++;
@@ -114,7 +127,7 @@ export class Orchestrator {
           break;
         }
         // Render once more to show stale message, then wait
-        this.dashboard.render(cards, this.activeAgents, this.iterationCounts);
+        this.dashboard.render(cards, this.activeAgents, this.iterationCounts, this.draining);
         await sleep(2000);
         continue;
       }
@@ -138,7 +151,7 @@ export class Orchestrator {
             debugLog(`[heartbeat] tick=${tick} active=${this.activeAgents.size} promises=${this.completionPromises.size}`);
           }
           const freshCards = discoverCards(this.config.planDir, this.deps.fs);
-          this.dashboard.render(freshCards, this.activeAgents, this.iterationCounts);
+          this.dashboard.render(freshCards, this.activeAgents, this.iterationCounts, this.draining);
         }, 1000);
 
         const finished = await Promise.race(this.completionPromises.values());
@@ -150,8 +163,9 @@ export class Orchestrator {
     }
 
     // Final render and cleanup
+    this.teardownKeyboardHandler();
     const finalCards = discoverCards(this.config.planDir, this.deps.fs);
-    this.dashboard.render(finalCards, this.activeAgents, this.iterationCounts);
+    this.dashboard.render(finalCards, this.activeAgents, this.iterationCounts, this.draining);
     this.dashboard.cleanup();
     this.cleanup();
   }
@@ -471,6 +485,60 @@ export class Orchestrator {
         isNode: c.isNode,
       })),
     };
+  }
+
+  private setupKeyboardHandler(): void {
+    if (!process.stdin.isTTY) return;
+
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.setEncoding("utf-8");
+
+    const handler = (key: string) => {
+      // ESC (0x1b) — soft shutdown
+      if (key === "\x1b") {
+        if (this.draining) return; // already draining
+        this.draining = true;
+        this.dashboard.log("*", "ESC pressed — draining. Waiting for running agents to finish...");
+      }
+
+      // Ctrl-C (0x03) — double-tap for hard exit
+      if (key === "\x03") {
+        const now = Date.now();
+        if (now - this.lastCtrlC < 1000) {
+          // Second Ctrl-C within 1 second — force exit
+          this.dashboard.log("*", "Force exit.");
+          this.teardownKeyboardHandler();
+          this.dashboard.cleanup();
+          this.cleanup();
+          process.exit(1);
+        }
+        this.lastCtrlC = now;
+        // First Ctrl-C — start draining and hint about force exit
+        if (!this.draining) {
+          this.draining = true;
+          this.dashboard.log("*", "Ctrl-C — draining. Press Ctrl-C again to force quit.");
+        } else {
+          this.dashboard.log("*", "Press Ctrl-C again to force quit.");
+        }
+      }
+    };
+
+    process.stdin.on("data", handler);
+    this.stdinCleanup = () => {
+      process.stdin.removeListener("data", handler);
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(false);
+      }
+      process.stdin.pause();
+    };
+  }
+
+  private teardownKeyboardHandler(): void {
+    if (this.stdinCleanup) {
+      this.stdinCleanup();
+      this.stdinCleanup = null;
+    }
   }
 
   private cleanup(): void {
