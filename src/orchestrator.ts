@@ -12,6 +12,8 @@ import { debugLog, debugLogProcessError } from "./debug-log.js";
 import { dotPathToGuid } from "./guid.js";
 import { resolveClaudePath } from "./resolve-claude.js";
 import { generateSystemPrompt } from "./system-prompt.js";
+import { Dashboard } from "./dashboard.js";
+import { parseStreamChunk, summarizeEvent, extractCost, isRateLimitError } from "./stream-parser.js";
 import {
   AgentSlot,
   Card,
@@ -60,6 +62,7 @@ export class Orchestrator {
   private processes: Map<string, ProcessHandle> = new Map();
   private completionPromises: Map<string, Promise<string>> = new Map();
   private iterationCounts: Map<string, number> = new Map();
+  private dashboard: Dashboard;
 
   constructor(
     config: Partial<OrchestratorConfig> = {},
@@ -67,15 +70,12 @@ export class Orchestrator {
   ) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.deps = deps;
+    this.dashboard = new Dashboard();
   }
 
   async run(): Promise<void> {
-    console.log(
-      `[orchestrator] Starting with root: ${this.config.rootPlanFile}`
-    );
-    console.log(
-      `[orchestrator] Max parallel agents: ${this.config.maxParallelAgents}`
-    );
+    this.dashboard.log("*", `Starting with root: ${this.config.rootPlanFile}`);
+    this.dashboard.log("*", `Max parallel agents: ${this.config.maxParallelAgents}`);
 
     let staleCycles = 0;
     const maxStaleCycles = 3;
@@ -83,8 +83,11 @@ export class Orchestrator {
     while (true) {
       const cards = discoverCards(this.config.planDir, this.deps.fs);
 
+      // Render dashboard each cycle
+      this.dashboard.render(cards, this.activeAgents, this.iterationCounts);
+
       if (cards.length > 0 && cards.every((c) => c.status === "DONE")) {
-        console.log("[orchestrator] All cards are DONE. Exiting.");
+        this.dashboard.log("*", "All cards are DONE. Exiting.");
         break;
       }
 
@@ -95,13 +98,13 @@ export class Orchestrator {
 
       if (eligible.length === 0 && this.activeAgents.size === 0) {
         staleCycles++;
-        console.log(
-          `[orchestrator] No eligible cards and no active agents. Stale cycle ${staleCycles}/${maxStaleCycles}.`
-        );
+        this.dashboard.log("*", `No eligible cards. Stale cycle ${staleCycles}/${maxStaleCycles}.`);
         if (staleCycles >= maxStaleCycles) {
-          console.log("[orchestrator] Max stale cycles reached. Exiting.");
+          this.dashboard.log("*", "Max stale cycles reached. Exiting.");
           break;
         }
+        // Render once more to show stale message, then wait
+        this.dashboard.render(cards, this.activeAgents, this.iterationCounts);
         await sleep(2000);
         continue;
       }
@@ -117,13 +120,24 @@ export class Orchestrator {
       }
 
       if (this.completionPromises.size > 0) {
-        const finished = await Promise.race(this.completionPromises.values());
-        this.reapAgent(finished);
-      }
+        // Start a render tick so the dashboard stays alive while agents run
+        const renderInterval = setInterval(() => {
+          const freshCards = discoverCards(this.config.planDir, this.deps.fs);
+          this.dashboard.render(freshCards, this.activeAgents, this.iterationCounts);
+        }, 1000);
 
-      await sleep(500);
+        const finished = await Promise.race(this.completionPromises.values());
+        clearInterval(renderInterval);
+        this.reapAgent(finished);
+      } else {
+        await sleep(500);
+      }
     }
 
+    // Final render and cleanup
+    const finalCards = discoverCards(this.config.planDir, this.deps.fs);
+    this.dashboard.render(finalCards, this.activeAgents, this.iterationCounts);
+    this.dashboard.cleanup();
     this.cleanup();
   }
 
@@ -180,6 +194,7 @@ export class Orchestrator {
 
   /**
    * Spawn a Claude Code agent for a card.
+   * Uses --output-format stream-json to get real-time events.
    */
   private spawnAgent(card: Card): void {
     const sessionId = dotPathToGuid(card.dotPath);
@@ -190,8 +205,9 @@ export class Orchestrator {
     const spawnArgs = [
       "--dangerously-skip-permissions",
       "--print",
+      "--verbose",
       "--output-format",
-      "json",
+      "stream-json",
       "--session-id",
       sessionId,
       "--system-prompt",
@@ -202,9 +218,8 @@ export class Orchestrator {
 
     const claudePath = resolveClaudePath();
 
-    console.log(
-      `[orchestrator] Spawning agent for ${card.dotPath} [${isPhase(card.status) ? card.status : formatStatus(card.status)}]`
-    );
+    const statusLabel = isPhase(card.status) ? card.status : formatStatus(card.status);
+    this.dashboard.log(card.dotPath, `Spawning [${statusLabel}]`);
     debugLog(
       `Spawning agent for ${card.dotPath} — ${claudePath} ${spawnArgs.slice(0, 4).join(" ")} ...`
     );
@@ -226,45 +241,76 @@ export class Orchestrator {
     const count = this.iterationCounts.get(card.dotPath) ?? 0;
     this.iterationCounts.set(card.dotPath, count + 1);
 
-    let stdout = "";
+    // Stream-json: parse newline-delimited JSON events as they arrive
+    let stdoutBuffer = "";
     let stderr = "";
+
     proc.stdout?.on("data", (data: Buffer) => {
-      stdout += data.toString();
+      stdoutBuffer += data.toString();
+      const { events, remainder } = parseStreamChunk(stdoutBuffer);
+      stdoutBuffer = remainder;
+
+      for (const event of events) {
+        const summary = summarizeEvent(event);
+        if (summary) {
+          this.dashboard.log(card.dotPath, summary);
+        }
+
+        const cost = extractCost(event);
+        if (cost !== null) {
+          this.dashboard.addCost(cost);
+        }
+
+        const rateLimit = isRateLimitError(event);
+        if (rateLimit) {
+          const c = this.iterationCounts.get(card.dotPath) ?? 1;
+          this.iterationCounts.set(card.dotPath, Math.max(0, c - 1));
+        }
+      }
     });
+
     proc.stderr?.on("data", (data: Buffer) => {
       stderr += data.toString();
     });
 
     const completionPromise = new Promise<string>((resolve) => {
       proc.on("close", (code) => {
-        debugLog(
-          `Agent ${card.dotPath} exited with code ${code}`
-        );
+        debugLog(`Agent ${card.dotPath} exited with code ${code}`);
         if (code !== 0) {
           debugLogProcessError({
             dotPath: card.dotPath,
             command: claudePath,
             args: spawnArgs,
             error: new Error(`Process exited with code ${code}`),
-            stdout,
+            stdout: stdoutBuffer,
             stderr,
             exitCode: code,
           });
         }
         if (stderr) {
-          process.stderr.write(`[${card.dotPath}] ${stderr}\n`);
+          debugLog(`[${card.dotPath}] stderr: ${stderr.slice(-500)}`);
         }
-        this.handleAgentOutput(card.dotPath, stdout, code);
+        // Parse any remaining buffered data
+        if (stdoutBuffer.trim()) {
+          const { events } = parseStreamChunk(stdoutBuffer + "\n");
+          for (const event of events) {
+            const summary = summarizeEvent(event);
+            if (summary) this.dashboard.log(card.dotPath, summary);
+            const cost = extractCost(event);
+            if (cost !== null) this.dashboard.addCost(cost);
+          }
+        }
+        this.dashboard.log(card.dotPath, `Agent finished (exit ${code})`);
         resolve(card.dotPath);
       });
       proc.on("error", (err) => {
-        console.error(`[${card.dotPath}] Process error: ${err.message}`);
+        this.dashboard.log(card.dotPath, `Error: ${err.message}`);
         debugLogProcessError({
           dotPath: card.dotPath,
-          command: "claude",
+          command: claudePath,
           args: spawnArgs,
           error: err,
-          stdout,
+          stdout: stdoutBuffer,
           stderr,
         });
         resolve(card.dotPath);
@@ -274,48 +320,8 @@ export class Orchestrator {
     this.completionPromises.set(card.dotPath, completionPromise);
   }
 
-  /**
-   * Handle agent output, parsing JSON and detecting 429 rate limits.
-   */
-  handleAgentOutput(
-    dotPath: string,
-    output: string,
-    exitCode: number | null
-  ): void {
-    if (!output.trim()) {
-      console.log(
-        `[${dotPath}] Agent exited with code ${exitCode} (no output)`
-      );
-      return;
-    }
-
-    try {
-      const json = JSON.parse(output);
-
-      if (json.error && json.error.type === "rate_limit_error") {
-        const retryAfter = json.error.retry_after ?? 60;
-        console.warn(
-          `[${dotPath}] Rate limited (429). Retry after ${retryAfter}s. Will retry on next cycle.`
-        );
-        const count = this.iterationCounts.get(dotPath) ?? 1;
-        this.iterationCounts.set(dotPath, Math.max(0, count - 1));
-        return;
-      }
-
-      if (json.cost_usd !== undefined) {
-        console.log(`[${dotPath}] Cost: $${json.cost_usd.toFixed(4)}`);
-      }
-
-      if (json.result) {
-        console.log(`[${dotPath}] ${String(json.result).slice(0, 200)}`);
-      }
-    } catch {
-      console.log(`[${dotPath}] ${output.slice(0, 200)}`);
-    }
-  }
-
   private reapAgent(dotPath: string): void {
-    console.log(`[orchestrator] Reaping agent for ${dotPath}`);
+    this.dashboard.log(dotPath, "Agent finished");
     this.activeAgents.delete(dotPath);
     this.processes.delete(dotPath);
     this.completionPromises.delete(dotPath);
@@ -334,9 +340,7 @@ export class Orchestrator {
         const target = cards.find((c) => c.dotPath === targetDotPath);
 
         if (target && isPhase(target.status)) {
-          console.log(
-            `[orchestrator] Propagating conflict: ${card.dotPath} ↔ ${targetDotPath}`
-          );
+          this.dashboard.log(card.dotPath, `Conflict propagated ↔ ${targetDotPath}`);
           const updatedContent = updateCardStatus(target.rawContent, {
             kind: "CONFLICTS-WITH",
             dotPath: card.dotPath,
@@ -371,9 +375,7 @@ export class Orchestrator {
     const parent = allCards.find((c) => c.dotPath === parentPath);
 
     if (parent && parent.status === "DONE") {
-      console.log(
-        `[orchestrator] Regressing common parent ${parentPath} to [PLAN] due to conflict between ${card1.dotPath} and ${card2.dotPath}`
-      );
+      this.dashboard.log(parentPath, `Regressed to [PLAN] — conflict between ${card1.dotPath} and ${card2.dotPath}`);
       let content = updateCardStatus(parent.rawContent, "PLAN");
       content += `\n\n## Conflict Note\nCards ${card1.dotPath} and ${card2.dotPath} are in conflict. Re-decomposition needed.\n`;
       this.deps.fs.writeFileSync(parent.filePath, content);
@@ -408,7 +410,7 @@ export class Orchestrator {
 
   private cleanup(): void {
     for (const [dotPath, proc] of this.processes) {
-      console.log(`[orchestrator] Killing agent for ${dotPath}`);
+      this.dashboard.log(dotPath, "Killing agent");
       proc.kill();
     }
     this.activeAgents.clear();

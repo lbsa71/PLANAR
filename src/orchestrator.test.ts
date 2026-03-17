@@ -443,47 +443,5 @@ describe("Orchestrator.regressCommonParent", () => {
   });
 });
 
-describe("Orchestrator.handleAgentOutput", () => {
-  it("parses JSON cost output", () => {
-    const orch = new Orchestrator({}, {
-      fs: makeMockFs(),
-      spawner: makeMockSpawner(),
-    });
-
-    // Should not throw
-    orch.handleAgentOutput("2.1", JSON.stringify({ cost_usd: 0.05 }), 0);
-  });
-
-  it("handles rate limit and decrements iteration count", () => {
-    const orch = new Orchestrator({}, {
-      fs: makeMockFs(),
-      spawner: makeMockSpawner(),
-    });
-
-    orch.handleAgentOutput(
-      "2.1",
-      JSON.stringify({ error: { type: "rate_limit_error", retry_after: 30 } }),
-      1
-    );
-    // No throw, handled gracefully
-  });
-
-  it("handles empty output", () => {
-    const orch = new Orchestrator({}, {
-      fs: makeMockFs(),
-      spawner: makeMockSpawner(),
-    });
-
-    orch.handleAgentOutput("2.1", "", 0);
-    orch.handleAgentOutput("2.1", "   ", 1);
-  });
-
-  it("handles non-JSON output", () => {
-    const orch = new Orchestrator({}, {
-      fs: makeMockFs(),
-      spawner: makeMockSpawner(),
-    });
-
-    orch.handleAgentOutput("2.1", "Some plain text", 0);
-  });
-});
+// Note: handleAgentOutput was replaced by inline stream-json parsing.
+// See stream-parser.test.ts for event parsing tests.
