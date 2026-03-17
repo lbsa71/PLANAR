@@ -21,6 +21,20 @@ export interface DebugLogDeps {
 }
 
 /**
+ * Log a restart banner with timestamp.
+ */
+export function debugLogBanner(
+  command: string,
+  logFile: string = DEFAULT_LOG_FILE,
+  deps: DebugLogDeps = nodeFs
+): void {
+  const timestamp = new Date().toISOString();
+  const banner = `\n${"=".repeat(60)}\n  PLANAR ${command} — started at ${timestamp}\n${"=".repeat(60)}\n`;
+  deps.appendFileSync(logFile, banner);
+  capLogFile(logFile, deps);
+}
+
+/**
  * Append a debug log entry, then cap the file at MAX_LINES.
  */
 export function debugLog(

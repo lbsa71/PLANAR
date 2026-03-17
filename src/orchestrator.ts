@@ -10,6 +10,7 @@ import {
 } from "./card.js";
 import { debugLog, debugLogProcessError } from "./debug-log.js";
 import { dotPathToGuid } from "./guid.js";
+import { resolveClaudePath } from "./resolve-claude.js";
 import { generateSystemPrompt } from "./system-prompt.js";
 import {
   AgentSlot,
@@ -199,16 +200,16 @@ export class Orchestrator {
       prompt,
     ];
 
+    const claudePath = resolveClaudePath();
+
     console.log(
       `[orchestrator] Spawning agent for ${card.dotPath} [${isPhase(card.status) ? card.status : formatStatus(card.status)}]`
     );
     debugLog(
-      `Spawning agent for ${card.dotPath} — claude ${spawnArgs.slice(0, 6).join(" ")} ...`
+      `Spawning agent for ${card.dotPath} — ${claudePath} ${spawnArgs.slice(0, 4).join(" ")} ...`
     );
-
-    const proc = this.deps.spawner.spawn("claude", spawnArgs, {
+    const proc = this.deps.spawner.spawn(claudePath, spawnArgs, {
       stdio: "pipe",
-      shell: true,
     });
 
     const slot: AgentSlot = {
@@ -242,7 +243,7 @@ export class Orchestrator {
         if (code !== 0) {
           debugLogProcessError({
             dotPath: card.dotPath,
-            command: "claude",
+            command: claudePath,
             args: spawnArgs,
             error: new Error(`Process exited with code ${code}`),
             stdout,

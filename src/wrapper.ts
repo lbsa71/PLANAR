@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import { parseCard, discoverCards, checkReferenceIntegrity } from "./card.js";
 import { debugLog, debugLogProcessError } from "./debug-log.js";
 import { dotPathToGuid } from "./guid.js";
+import { resolveClaudePath } from "./resolve-claude.js";
 import { generateSystemPrompt } from "./system-prompt.js";
 import {
   ClaudeInvoker,
@@ -19,15 +20,15 @@ const nodeFs: FileSystem = {
   readdirSync: (p) => fs.readdirSync(p) as string[],
 };
 
-/** Default ClaudeInvoker using execFileSync */
+/** Default ClaudeInvoker using execFileSync with resolved claude path */
 const defaultClaude: ClaudeInvoker = {
   invoke(args: string[], timeoutMs: number): string | null {
+    const claudePath = resolveClaudePath();
     try {
-      return execFileSync("claude", args, {
+      return execFileSync(claudePath, args, {
         stdio: ["pipe", "pipe", "inherit"],
         encoding: "utf-8",
         timeout: timeoutMs,
-        shell: true,
       });
     } catch (err: unknown) {
       if (err && typeof err === "object" && "stdout" in err) {

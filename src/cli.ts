@@ -8,6 +8,7 @@ import {
   formatStatus,
   checkReferenceIntegrity,
 } from "./card.js";
+import { debugLogBanner } from "./debug-log.js";
 import type { CardStatus } from "./types.js";
 
 function printUsage(): void {
@@ -87,6 +88,8 @@ async function main(): Promise<void> {
     process.chdir(options["cwd"]);
     console.log(`[planar] Working directory: ${options["cwd"]}`);
   }
+
+  debugLogBanner(`${command} ${target || ""}`);
 
   const planDir = options["plan-dir"] ?? "plan";
   const rootFile = options["root"] ?? "plan/root.md";
