@@ -62,7 +62,7 @@ describe("fetchDetectPull", () => {
     });
   });
 
-  it("returns diverged when merge-base fails (not ancestor)", async () => {
+  it("returns merged when diverged but merge succeeds", async () => {
     const { runner } = mockGit([
       ["rev-parse --abbrev-ref HEAD", "main"],
       ["fetch origin", ""],
@@ -72,13 +72,43 @@ describe("fetchDetectPull", () => {
         "merge-base --is-ancestor",
         new Error("not ancestor"),
       ],
+      ["merge-base HEAD", "ccc000"],
+      ["diff ccc000", "diff --git a/foo.ts\n+diverged change"],
+      ["--name-only", "src/foo.ts"],
+      ["merge origin/main", ""],
+    ]);
+
+    const result = await fetchDetectPull(runner);
+
+    expect(result.status).toBe("merged");
+    if (result.status === "merged") {
+      expect(result.diff).toContain("diverged change");
+      expect(result.changedFiles).toEqual(["src/foo.ts"]);
+    }
+  });
+
+  it("returns diverged when merge-base fails and merge also fails", async () => {
+    const { runner } = mockGit([
+      ["rev-parse --abbrev-ref HEAD", "main"],
+      ["fetch origin", ""],
+      ["rev-parse HEAD", "aaa111"],
+      ["rev-parse origin/main", "bbb222"],
+      [
+        "merge-base --is-ancestor",
+        new Error("not ancestor"),
+      ],
+      ["merge-base HEAD", "ccc000"],
+      ["diff ccc000", "some diff"],
+      ["--name-only", "file.ts"],
+      ["merge origin/main", new Error("CONFLICT: merge failed")],
+      ["merge --abort", ""],
     ]);
 
     const result = await fetchDetectPull(runner);
 
     expect(result.status).toBe("diverged");
     if (result.status === "diverged") {
-      expect(result.warning).toContain("diverged");
+      expect(result.warning).toContain("Merge failed");
     }
   });
 

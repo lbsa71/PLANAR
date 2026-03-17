@@ -144,4 +144,5 @@ export interface GitRunner {
 export type FetchResult =
   | { status: "up-to-date" }
   | { status: "pulled"; diff: string; changedFiles: string[] }
+  | { status: "merged"; diff: string; changedFiles: string[] }
   | { status: "diverged"; warning: string };

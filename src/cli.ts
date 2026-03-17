@@ -309,10 +309,17 @@ async function main(): Promise<void> {
               console.warn(`[watch] ${result.warning}`);
               break;
 
+            case "merged":
             case "pulled": {
-              console.log(
-                `[watch] Pulled upstream changes — ${result.changedFiles.length} file(s) changed`
-              );
+              if (result.status === "merged") {
+                console.log(
+                  `[watch] Merged diverged upstream — ${result.changedFiles.length} file(s) changed`
+                );
+              } else {
+                console.log(
+                  `[watch] Pulled upstream changes — ${result.changedFiles.length} file(s) changed`
+                );
+              }
 
               const affected = findAffectedCards(
                 result.changedFiles,

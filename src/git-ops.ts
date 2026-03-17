@@ -28,36 +28,65 @@ export async function fetchDetectPull(
   }
 
   // 4. Check fast-forward possibility
-  try {
-    await git.run(["merge-base", "--is-ancestor", "HEAD", remoteBranch]);
-  } catch {
-    return {
-      status: "diverged",
-      warning: `Local branch '${branchName}' has diverged from ${remoteBranch}. Cannot fast-forward.`,
-    };
+  const canFastForward = await git
+    .run(["merge-base", "--is-ancestor", "HEAD", remoteBranch])
+    .then(() => true)
+    .catch(() => false);
+
+  // 5. Capture diff before pulling/merging
+  //    For diverged branches, use merge-base to find common ancestor for the diff
+  let diffBase: string;
+  if (canFastForward) {
+    diffBase = "HEAD";
+  } else {
+    diffBase = (
+      await git.run(["merge-base", "HEAD", remoteBranch])
+    ).trim();
   }
 
-  // 5. Capture diff before pulling
-  const diff = (await git.run(["diff", `HEAD..${remoteBranch}`])).trim();
+  const diff = (await git.run(["diff", `${diffBase}..${remoteBranch}`])).trim();
 
   // 6. Capture changed files
   const nameOnly = (
-    await git.run(["diff", "--name-only", `HEAD..${remoteBranch}`])
+    await git.run(["diff", "--name-only", `${diffBase}..${remoteBranch}`])
   ).trim();
   const changedFiles = nameOnly
     .split("\n")
     .filter((f) => f.length > 0);
 
-  // 7. Pull
+  // 7. Pull or merge
+  if (canFastForward) {
+    try {
+      await git.run(["pull", "--ff-only"]);
+    } catch (err) {
+      return {
+        status: "diverged",
+        warning: `git pull --ff-only failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+    return { status: "pulled", diff, changedFiles };
+  }
+
+  // 8. Diverged — attempt a merge commit
   try {
-    await git.run(["pull", "--ff-only"]);
+    await git.run([
+      "merge",
+      remoteBranch,
+      "-m",
+      `chore(planar): merge ${remoteBranch} into ${branchName}`,
+    ]);
   } catch (err) {
+    // Merge conflict or other failure — abort and report
+    try {
+      await git.run(["merge", "--abort"]);
+    } catch {
+      // ignore abort failure
+    }
     return {
       status: "diverged",
-      warning: `git pull --ff-only failed: ${err instanceof Error ? err.message : String(err)}`,
+      warning: `Local branch '${branchName}' has diverged from ${remoteBranch}. Merge failed: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
 
-  // 8. Return
-  return { status: "pulled", diff, changedFiles };
+  return { status: "merged", diff, changedFiles };
 }
