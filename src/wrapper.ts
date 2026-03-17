@@ -140,11 +140,16 @@ export async function runCardLoop(
       }
       if (parsed.rateLimited) {
         const wait = parsed.retryAfterSecs ?? 60;
+        const retryAt = parsed.resetsAt
+          ? new Date(parsed.resetsAt * 1000).toLocaleTimeString()
+          : new Date(Date.now() + wait * 1000).toLocaleTimeString();
         console.warn(
-          `[${card.dotPath}] Rate limited (429). Waiting ${wait}s...`
+          `[${card.dotPath}] Rate limited (429). Retrying at ${retryAt}.`
         );
-        debugLog(`[${card.dotPath}] Rate limited, waiting ${wait}s`);
-        await sleep(wait * 1000);
+        debugLog(
+          `[${card.dotPath}] Rate limited, waiting ${wait}s until ${retryAt}`
+        );
+        await waitWithCountdown(card.dotPath, wait, retryAt);
         i--;
         continue;
       }
@@ -198,6 +203,7 @@ export interface ParsedOutput {
   costUsd?: number;
   rateLimited: boolean;
   retryAfterSecs?: number;
+  resetsAt?: number;
   result?: string;
 }
 
@@ -211,6 +217,21 @@ export function parseClaudeOutput(output: string | null): ParsedOutput {
 
   try {
     const json = JSON.parse(output);
+
+    if (json.type === "rate_limit_event") {
+      const resetsAt =
+        typeof json.rate_limit_info?.resetsAt === "number"
+          ? json.rate_limit_info.resetsAt
+          : undefined;
+      return {
+        rateLimited: true,
+        retryAfterSecs:
+          resetsAt !== undefined
+            ? Math.max(0, Math.ceil((resetsAt * 1000 - Date.now()) / 1000))
+            : 60,
+        resetsAt,
+      };
+    }
 
     if (json.error && json.error.type === "rate_limit_error") {
       return {
@@ -241,4 +262,40 @@ export function parseClaudeOutput(output: string | null): ParsedOutput {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitWithCountdown(
+  dotPath: string,
+  totalSecs: number,
+  retryAt: string
+): Promise<void> {
+  const endMs = Date.now() + totalSecs * 1000;
+  let wroteInteractiveLine = false;
+
+  while (true) {
+    const remainingMs = endMs - Date.now();
+    if (remainingMs <= 0) break;
+
+    const remainingSecs = Math.ceil(remainingMs / 1000);
+    const message = `[${dotPath}] Rate limited. Retrying in ${formatCountdown(remainingSecs)} (at ${retryAt})`;
+    if (process.stdout.isTTY) {
+      process.stdout.write(`\r${message.padEnd(100)}`);
+      wroteInteractiveLine = true;
+    } else {
+      console.warn(message);
+    }
+
+    await sleep(Math.min(1000, remainingMs));
+  }
+
+  if (wroteInteractiveLine) {
+    process.stdout.write("\n");
+  }
+}
+
+function formatCountdown(totalSecs: number): string {
+  const mins = Math.floor(totalSecs / 60);
+  const secs = totalSecs % 60;
+  if (mins === 0) return `${secs}s`;
+  return `${mins}m${secs.toString().padStart(2, "0")}s`;
 }

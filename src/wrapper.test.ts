@@ -322,6 +322,20 @@ describe("parseClaudeOutput", () => {
     expect(result.retryAfterSecs).toBe(15);
   });
 
+  it("detects rate_limit_event output and preserves resetsAt", () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(100_000);
+    const result = parseClaudeOutput(
+      JSON.stringify({
+        type: "rate_limit_event",
+        rate_limit_info: { status: "rejected", resetsAt: 102 },
+      })
+    );
+    expect(result.rateLimited).toBe(true);
+    expect(result.retryAfterSecs).toBe(2);
+    expect(result.resetsAt).toBe(102);
+    nowSpy.mockRestore();
+  });
+
   it("defaults retry_after for rate_limit_error", () => {
     const result = parseClaudeOutput(
       JSON.stringify({ error: { type: "rate_limit_error" } })

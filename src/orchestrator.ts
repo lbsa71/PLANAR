@@ -15,7 +15,13 @@ import { debugLog, debugLogProcessError } from "./debug-log.js";
 import { resolveClaudePath } from "./resolve-claude.js";
 import { generateSystemPrompt } from "./system-prompt.js";
 import { Dashboard } from "./dashboard.js";
-import { parseStreamChunk, summarizeEvent, extractCost, isRateLimitError } from "./stream-parser.js";
+import {
+  parseStreamChunk,
+  summarizeEvent,
+  extractCost,
+  isRateLimitError,
+  RateLimitErrorInfo,
+} from "./stream-parser.js";
 import {
   AgentSlot,
   Card,
@@ -277,11 +283,36 @@ export class Orchestrator {
    * Uses --output-format stream-json to get real-time events.
    */
   private spawnAgent(card: Card): void {
+    const slot: AgentSlot = {
+      dotPath: card.dotPath,
+      cardFile: card.filePath,
+      pid: 0,
+      startedAt: new Date(),
+    };
+
+    this.activeAgents.set(card.dotPath, slot);
+
+    const concurrent = this.activeAgents.size;
+    if (concurrent > this.peakConcurrent) {
+      this.peakConcurrent = concurrent;
+      this.dashboard.log("*", `New peak concurrent agents: ${this.peakConcurrent} / ${this.config.maxParallelAgents}`);
+    }
+
+    const completionPromise = new Promise<string>((resolve) => {
+      this.startAgentAttempt(card, slot, resolve);
+    });
+
+    this.completionPromises.set(card.dotPath, completionPromise);
+  }
+
+  private startAgentAttempt(
+    card: Card,
+    slot: AgentSlot,
+    resolve: (dotPath: string) => void
+  ): void {
     const iterNum = this.iterationCounts.get(card.dotPath) ?? 0;
     const systemPrompt = generateSystemPrompt(card, this.config.rootPlanFile);
-
     const prompt = `@${card.filePath} @${this.config.rootPlanFile}\n\nDo the next thing for this card. Perform exactly one operation, update the card file, and exit.`;
-
     const spawnArgs = [
       "--dangerously-skip-permissions",
       "--print",
@@ -293,9 +324,7 @@ export class Orchestrator {
       "--",
       prompt,
     ];
-
     const claudePath = resolveClaudePath();
-
     const statusLabel = isPhase(card.status) ? card.status : formatStatus(card.status);
     this.dashboard.log(card.dotPath, `Spawning [${statusLabel}]`);
     debugLog(
@@ -305,29 +334,18 @@ export class Orchestrator {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    const slot: AgentSlot = {
-      dotPath: card.dotPath,
-      cardFile: card.filePath,
-      pid: proc.pid,
-      startedAt: new Date(),
-    };
-
-    this.activeAgents.set(card.dotPath, slot);
+    slot.pid = proc.pid;
+    slot.cardFile = card.filePath;
+    slot.waitingForRateLimitUntil = undefined;
+    slot.rateLimitType = undefined;
     this.processes.set(card.dotPath, proc);
-
     this.iterationCounts.set(card.dotPath, iterNum + 1);
-
-    const concurrent = this.activeAgents.size;
-    if (concurrent > this.peakConcurrent) {
-      this.peakConcurrent = concurrent;
-      this.dashboard.log("*", `New peak concurrent agents: ${this.peakConcurrent} / ${this.config.maxParallelAgents}`);
-    }
 
     debugLog(`[${card.dotPath}] pid=${proc.pid} stdout=${!!proc.stdout} stderr=${!!proc.stderr}`);
 
-    // Stream-json: parse newline-delimited JSON events as they arrive
     let stdoutBuffer = "";
     let stderr = "";
+    let rateLimitInfo: RateLimitErrorInfo | null = null;
 
     proc.stdout?.on("data", (data: Buffer) => {
       const chunk = data.toString();
@@ -339,22 +357,7 @@ export class Orchestrator {
       debugLog(`[${card.dotPath}] Parsed ${events.length} events, remainder: ${remainder.length} bytes`);
 
       for (const event of events) {
-        debugLog(`[${card.dotPath}] Event: type=${event.type} subtype=${event.subtype ?? ""}`);
-        const summary = summarizeEvent(event);
-        if (summary) {
-          this.dashboard.log(card.dotPath, summary);
-        }
-
-        const cost = extractCost(event);
-        if (cost !== null) {
-          this.dashboard.addCost(cost);
-        }
-
-        const rateLimit = isRateLimitError(event);
-        if (rateLimit) {
-          const c = this.iterationCounts.get(card.dotPath) ?? 1;
-          this.iterationCounts.set(card.dotPath, Math.max(0, c - 1));
-        }
+        rateLimitInfo = this.handleEvent(card.dotPath, slot, event, rateLimitInfo);
       }
     });
 
@@ -364,61 +367,160 @@ export class Orchestrator {
       stderr += chunk;
     });
 
-    const completionPromise = new Promise<string>((resolve) => {
-      proc.on("close", (code) => {
-        debugLog(`Agent ${card.dotPath} exited with code ${code}`);
-        if (code !== 0) {
-          // Track consecutive errors for backoff
-          const prevErrors = this.errorCounts.get(card.dotPath) ?? 0;
-          this.errorCounts.set(card.dotPath, prevErrors + 1);
-          this.dashboard.log(
-            card.dotPath,
-            `Error (exit ${code}) — ${prevErrors + 1} consecutive failures`
-          );
-          debugLogProcessError({
-            dotPath: card.dotPath,
-            command: claudePath,
-            args: spawnArgs,
-            error: new Error(`Process exited with code ${code}`),
-            stdout: stdoutBuffer,
-            stderr,
-            exitCode: code,
-          });
-        } else {
-          // Reset error count on success
-          this.errorCounts.set(card.dotPath, 0);
+    proc.on("close", (code) => {
+      debugLog(`Agent ${card.dotPath} exited with code ${code}`);
+      if (stdoutBuffer.trim()) {
+        const { events } = parseStreamChunk(stdoutBuffer + "\n");
+        for (const event of events) {
+          rateLimitInfo = this.handleEvent(card.dotPath, slot, event, rateLimitInfo);
         }
-        if (stderr) {
-          debugLog(`[${card.dotPath}] stderr: ${stderr.slice(-500)}`);
-        }
-        // Parse any remaining buffered data
-        if (stdoutBuffer.trim()) {
-          const { events } = parseStreamChunk(stdoutBuffer + "\n");
-          for (const event of events) {
-            const summary = summarizeEvent(event);
-            if (summary) this.dashboard.log(card.dotPath, summary);
-            const cost = extractCost(event);
-            if (cost !== null) this.dashboard.addCost(cost);
-          }
-        }
-        this.dashboard.log(card.dotPath, `Agent finished (exit ${code})`);
-        resolve(card.dotPath);
-      });
-      proc.on("error", (err) => {
-        this.dashboard.log(card.dotPath, `Error: ${err.message}`);
+      }
+
+      if (code !== 0 && rateLimitInfo) {
+        this.processes.delete(card.dotPath);
+        void this.waitForRateLimit(card.filePath, card.dotPath, slot, rateLimitInfo, resolve);
+        return;
+      }
+
+      if (code !== 0) {
+        const prevErrors = this.errorCounts.get(card.dotPath) ?? 0;
+        this.errorCounts.set(card.dotPath, prevErrors + 1);
+        this.dashboard.log(
+          card.dotPath,
+          `Error (exit ${code}) — ${prevErrors + 1} consecutive failures`
+        );
         debugLogProcessError({
           dotPath: card.dotPath,
           command: claudePath,
           args: spawnArgs,
-          error: err,
+          error: new Error(`Process exited with code ${code}`),
           stdout: stdoutBuffer,
           stderr,
+          exitCode: code,
         });
-        resolve(card.dotPath);
-      });
+      } else {
+        this.errorCounts.set(card.dotPath, 0);
+      }
+
+      if (stderr) {
+        debugLog(`[${card.dotPath}] stderr: ${stderr.slice(-500)}`);
+      }
+
+      this.dashboard.log(card.dotPath, `Agent finished (exit ${code})`);
+      resolve(card.dotPath);
     });
 
-    this.completionPromises.set(card.dotPath, completionPromise);
+    proc.on("error", (err) => {
+      this.dashboard.log(card.dotPath, `Error: ${err.message}`);
+      debugLogProcessError({
+        dotPath: card.dotPath,
+        command: claudePath,
+        args: spawnArgs,
+        error: err,
+        stdout: stdoutBuffer,
+        stderr,
+      });
+      resolve(card.dotPath);
+    });
+  }
+
+  private handleEvent(
+    dotPath: string,
+    slot: AgentSlot,
+    event: { type: string; subtype?: string; [key: string]: unknown },
+    currentRateLimit: RateLimitErrorInfo | null
+  ): RateLimitErrorInfo | null {
+    debugLog(`[${dotPath}] Event: type=${event.type} subtype=${event.subtype ?? ""}`);
+    const summary = summarizeEvent(event);
+    if (summary) {
+      this.dashboard.log(dotPath, summary);
+    }
+
+    const cost = extractCost(event);
+    if (cost !== null) {
+      this.dashboard.addCost(cost);
+    }
+
+    const rateLimit = isRateLimitError(event);
+    if (!rateLimit) {
+      return currentRateLimit;
+    }
+
+    const waitUntilMs =
+      rateLimit.resetsAt !== undefined
+        ? rateLimit.resetsAt * 1000
+        : Date.now() + rateLimit.retryAfterSecs * 1000;
+    const previousWaitMs = slot.waitingForRateLimitUntil?.getTime() ?? 0;
+    if (waitUntilMs > previousWaitMs) {
+      slot.waitingForRateLimitUntil = new Date(waitUntilMs);
+      slot.rateLimitType = rateLimit.rateLimitType;
+      this.dashboard.log(
+        dotPath,
+        `Rate limited — retrying at ${slot.waitingForRateLimitUntil.toLocaleTimeString()}`
+      );
+      debugLog(
+        `[${dotPath}] Rate limited (${rateLimit.rateLimitType ?? "unknown"}), waiting until ${slot.waitingForRateLimitUntil.toISOString()}`
+      );
+    }
+
+    const c = this.iterationCounts.get(dotPath) ?? 1;
+    this.iterationCounts.set(dotPath, Math.max(0, c - 1));
+
+    if (!currentRateLimit) {
+      return rateLimit;
+    }
+
+    const currentResetsAt = currentRateLimit.resetsAt ?? 0;
+    const nextResetsAt = rateLimit.resetsAt ?? 0;
+    return nextResetsAt >= currentResetsAt ? rateLimit : currentRateLimit;
+  }
+
+  private async waitForRateLimit(
+    cardFile: string,
+    dotPath: string,
+    slot: AgentSlot,
+    rateLimit: RateLimitErrorInfo,
+    resolve: (dotPath: string) => void
+  ): Promise<void> {
+    const waitUntil =
+      slot.waitingForRateLimitUntil ??
+      new Date(Date.now() + rateLimit.retryAfterSecs * 1000);
+    const waitMs = Math.max(0, waitUntil.getTime() - Date.now());
+
+    if (waitMs > 0) {
+      await sleep(waitMs);
+    }
+
+    if (!this.activeAgents.has(dotPath)) {
+      resolve(dotPath);
+      return;
+    }
+
+    let latestCard: Card;
+    try {
+      const latestContent = this.deps.fs.readFileSync(cardFile, "utf-8");
+      latestCard = parseCard(cardFile, latestContent);
+    } catch (err) {
+      this.dashboard.log(
+        dotPath,
+        `Rate limit cleared, but card could not be reloaded: ${err instanceof Error ? err.message : err}`
+      );
+      resolve(dotPath);
+      return;
+    }
+
+    slot.waitingForRateLimitUntil = undefined;
+    slot.rateLimitType = undefined;
+
+    if (latestCard.status === "DONE" || !isPhase(latestCard.status)) {
+      this.errorCounts.set(dotPath, 0);
+      this.dashboard.log(dotPath, "Rate limit cleared — card no longer runnable");
+      resolve(dotPath);
+      return;
+    }
+
+    this.dashboard.log(dotPath, "Rate limit cleared — retrying");
+    this.startAgentAttempt(latestCard, slot, resolve);
   }
 
   private reapAgent(dotPath: string): void {

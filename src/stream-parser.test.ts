@@ -4,6 +4,7 @@ import {
   summarizeEvent,
   extractCost,
   isRateLimitError,
+  isRateLimitErrorAt,
 } from "./stream-parser.js";
 
 describe("parseStreamChunk", () => {
@@ -98,6 +99,18 @@ describe("summarizeEvent", () => {
   it("returns null for tool_result", () => {
     expect(summarizeEvent({ type: "tool_result" })).toBeNull();
   });
+
+  it("summarizes rejected rate limit events with reset time", () => {
+    expect(
+      summarizeEvent({
+        type: "rate_limit_event",
+        rate_limit_info: {
+          status: "rejected",
+          resetsAt: 1773752400,
+        },
+      })
+    ).toContain("Rate limit: rejected");
+  });
 });
 
 describe("extractCost", () => {
@@ -124,6 +137,38 @@ describe("isRateLimitError", () => {
       result: "rate_limit_error: too many requests",
     });
     expect(result).toEqual({ retryAfterSecs: 60 });
+  });
+
+  it("detects rejected rate_limit_event and uses resetsAt timestamp", () => {
+    const result = isRateLimitErrorAt(
+      {
+        type: "rate_limit_event",
+        rate_limit_info: {
+          status: "rejected",
+          resetsAt: 102,
+          rateLimitType: "five_hour",
+        },
+      },
+      100_000
+    );
+    expect(result).toEqual({
+      retryAfterSecs: 2,
+      resetsAt: 102,
+      status: "rejected",
+      rateLimitType: "five_hour",
+    });
+  });
+
+  it("ignores non-rejected rate_limit_event statuses", () => {
+    expect(
+      isRateLimitError({
+        type: "rate_limit_event",
+        rate_limit_info: {
+          status: "allowed_warning",
+          resetsAt: 1773752400,
+        },
+      })
+    ).toBeNull();
   });
 
   it("returns null for success", () => {

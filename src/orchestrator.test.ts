@@ -445,3 +445,116 @@ describe("Orchestrator.regressCommonParent", () => {
 
 // Note: handleAgentOutput was replaced by inline stream-json parsing.
 // See stream-parser.test.ts for event parsing tests.
+
+describe("Orchestrator rate limit handling", () => {
+  it("waits for the reset timestamp and retries the same card", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-17T12:08:40.000Z"));
+
+    const files = {
+      "plan/root.md": "---\nroot: plan/root.md\n---\n# 0 Root [DONE]\n",
+      "plan/1-card.md": "---\nroot: plan/root.md\n---\n# 1 Card [PLAN]\n",
+    };
+
+    type ListenerMap = {
+      stdout?: (data: Buffer) => void;
+      stderr?: (data: Buffer) => void;
+      close?: (code: number | null) => void;
+      error?: (err: Error) => void;
+    };
+
+    let spawnCount = 0;
+    const spawner: ProcessSpawner = {
+      spawn(): ProcessHandle {
+        spawnCount++;
+        const listeners: ListenerMap = {};
+        const pid = 1000 + spawnCount;
+
+        if (spawnCount === 1) {
+          setTimeout(() => {
+            listeners.stdout?.(
+              Buffer.from(
+                `${JSON.stringify({
+                  type: "rate_limit_event",
+                  rate_limit_info: {
+                    status: "rejected",
+                    resetsAt: Math.floor(Date.now() / 1000) + 2,
+                    rateLimitType: "five_hour",
+                  },
+                })}\n`
+              )
+            );
+            listeners.close?.(1);
+          }, 0);
+        } else {
+          setTimeout(() => {
+            listeners.stdout?.(
+              Buffer.from(
+                `${JSON.stringify({
+                  type: "result",
+                  subtype: "success",
+                  total_cost_usd: 0.01,
+                })}\n`
+              )
+            );
+            listeners.close?.(0);
+          }, 0);
+        }
+
+        return {
+          pid,
+          stdout: {
+            on(event: "data", cb: (data: Buffer) => void) {
+              if (event === "data") listeners.stdout = cb;
+            },
+          },
+          stderr: {
+            on(event: "data", cb: (data: Buffer) => void) {
+              if (event === "data") listeners.stderr = cb;
+            },
+          },
+          on(event: "close" | "error", cb: ((code: number | null) => void) | ((err: Error) => void)) {
+            if (event === "close") listeners.close = cb as (code: number | null) => void;
+            if (event === "error") listeners.error = cb as (err: Error) => void;
+          },
+          kill() {},
+        };
+      },
+    };
+
+    const orch = new Orchestrator(
+      {},
+      { fs: makeMockFs(files), spawner }
+    );
+    const card = makeCard({ dotPath: "1", filePath: "plan/1-card.md" });
+
+    (orch as unknown as { spawnAgent(card: Card): void }).spawnAgent(card);
+
+    const completion = (
+      orch as unknown as { completionPromises: Map<string, Promise<string>> }
+    ).completionPromises.get("1");
+    expect(completion).toBeDefined();
+
+    await vi.advanceTimersByTimeAsync(0);
+
+    const activeSlot = (
+      orch as unknown as {
+        activeAgents: Map<string, { waitingForRateLimitUntil?: Date }>;
+      }
+    ).activeAgents.get("1");
+    expect(activeSlot?.waitingForRateLimitUntil).toBeInstanceOf(Date);
+
+    await vi.runAllTimersAsync();
+    await completion;
+
+    expect(spawnCount).toBe(2);
+    expect(
+      (orch as unknown as { errorCounts: Map<string, number> }).errorCounts.get("1")
+    ).toBe(0);
+    expect(
+      (orch as unknown as { iterationCounts: Map<string, number> }).iterationCounts.get("1")
+    ).toBe(1);
+
+    vi.useRealTimers();
+  });
+});

@@ -9,6 +9,13 @@ export interface StreamEvent {
   [key: string]: unknown;
 }
 
+export interface RateLimitErrorInfo {
+  retryAfterSecs: number;
+  resetsAt?: number;
+  status?: string;
+  rateLimitType?: string;
+}
+
 /** Summarize a stream event into a short human-readable string for the dashboard */
 export function summarizeEvent(event: StreamEvent): string | null {
   switch (event.type) {
@@ -82,7 +89,34 @@ export function extractCost(event: StreamEvent): number | null {
 }
 
 /** Check if this is a rate limit error event */
-export function isRateLimitError(event: StreamEvent): { retryAfterSecs: number } | null {
+export function isRateLimitError(
+  event: StreamEvent
+): RateLimitErrorInfo | null {
+  return isRateLimitErrorAt(event, Date.now());
+}
+
+/** Check if this is a rate limit error event */
+export function isRateLimitErrorAt(
+  event: StreamEvent,
+  nowMs: number
+): RateLimitErrorInfo | null {
+  if (event.type === "rate_limit_event") {
+    const info = event.rate_limit_info as {
+      status?: string;
+      resetsAt?: number;
+      rateLimitType?: string;
+    } | undefined;
+    if (!info || info.status !== "rejected") {
+      return null;
+    }
+    return {
+      retryAfterSecs: secondsUntilReset(info.resetsAt, nowMs, 60),
+      resetsAt: info.resetsAt,
+      status: info.status,
+      rateLimitType: info.rateLimitType,
+    };
+  }
+
   if (event.type === "result" && event.is_error) {
     // Check for rate limit in the result
     const result = String(event.result ?? "");
@@ -124,4 +158,16 @@ function truncate(s: string, maxLen: number): string {
   const cleaned = s.replace(/\n/g, " ").trim();
   if (cleaned.length <= maxLen) return cleaned;
   return cleaned.slice(0, maxLen - 1) + "…";
+}
+
+function secondsUntilReset(
+  resetsAt: number | undefined,
+  nowMs: number,
+  fallbackSecs: number
+): number {
+  if (typeof resetsAt !== "number") {
+    return fallbackSecs;
+  }
+
+  return Math.max(0, Math.ceil((resetsAt * 1000 - nowMs) / 1000));
 }

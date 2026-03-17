@@ -83,11 +83,16 @@ export class Dashboard {
       let line = `${indent}${card.dotPath.padEnd(8 - depth * 2)}`;
 
       if (agent) {
-        const agentFrame = this.agentFrames.get(card.dotPath) ?? 0;
-        const spinner = SPINNER[agentFrame % SPINNER.length];
-        const agentElapsed = formatElapsed(agent.startedAt);
         line += `  ${yellow(`[${statusStr}]`.padEnd(18))}`;
-        line += `  ${green(spinner)} ${dim(`${agentElapsed}  iter #${iters}`)}`;
+        if (agent.waitingForRateLimitUntil) {
+          const retryAt = agent.waitingForRateLimitUntil.toLocaleTimeString();
+          line += `  ${yellow("⏳")} ${dim(`rate limit ${formatRemaining(agent.waitingForRateLimitUntil)}  retry @ ${retryAt}  iter #${iters}`)}`;
+        } else {
+          const agentFrame = this.agentFrames.get(card.dotPath) ?? 0;
+          const spinner = SPINNER[agentFrame % SPINNER.length];
+          const agentElapsed = formatElapsed(agent.startedAt);
+          line += `  ${green(spinner)} ${dim(`${agentElapsed}  iter #${iters}`)}`;
+        }
       } else if (!isPhase(card.status)) {
         line += `  ${red(`[${statusStr}]`.padEnd(18))}`;
       } else {
@@ -193,4 +198,19 @@ function compareDotPaths(a: string, b: string): number {
     if (va !== vb) return va - vb;
   }
   return 0;
+}
+
+function formatRemaining(until: Date): string {
+  const ms = until.getTime() - Date.now();
+  if (ms <= 0) return "clearing…";
+
+  const totalSecs = Math.ceil(ms / 1000);
+  const mins = Math.floor(totalSecs / 60);
+  const secs = totalSecs % 60;
+  if (mins === 0) return `${secs}s`;
+  if (mins < 60) return `${mins}m${secs.toString().padStart(2, "0")}s`;
+
+  const hours = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  return `${hours}h${remMins.toString().padStart(2, "0")}m`;
 }

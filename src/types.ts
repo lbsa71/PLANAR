@@ -61,6 +61,8 @@ export interface AgentSlot {
   cardFile: string;
   pid: number;
   startedAt: Date;
+  waitingForRateLimitUntil?: Date;
+  rateLimitType?: string;
 }
 
 /** Wrapper iteration result */
