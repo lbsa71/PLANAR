@@ -72,6 +72,10 @@ export class Orchestrator {
   /** Track Ctrl-C presses for double-tap hard exit */
   private lastCtrlC = 0;
   private stdinCleanup: (() => void) | null = null;
+  /** High-water mark: peak concurrent agents ever seen */
+  private peakConcurrent = 0;
+  /** Cycle counter for periodic peak logging */
+  private cycleSinceLastPeakLog = 0;
 
   constructor(
     config: Partial<OrchestratorConfig> = {},
@@ -91,7 +95,7 @@ export class Orchestrator {
 
     this.dashboard.log("*", `Starting with root: ${this.config.rootPlanFile}`);
     this.dashboard.log("*", `Plan dir: ${this.config.planDir}`);
-    this.dashboard.log("*", `Max parallel agents: ${this.config.maxParallelAgents}`);
+    this.dashboard.log("*", `Max parallel agents: ${this.config.maxParallelAgents} (--max-agents <n> to change)`);
     this.dashboard.log("*", `Press ESC to drain (finish running, stop new). Ctrl-C twice to force quit.`);
 
     let staleCycles = 0;
@@ -133,6 +137,13 @@ export class Orchestrator {
       }
 
       staleCycles = 0;
+
+      // Periodically log current concurrency (every 10 cycles when not at peak)
+      this.cycleSinceLastPeakLog++;
+      if (this.cycleSinceLastPeakLog >= 10 && this.activeAgents.size > 0) {
+        this.cycleSinceLastPeakLog = 0;
+        this.dashboard.log("*", `Active agents: ${this.activeAgents.size} / ${this.config.maxParallelAgents} (peak: ${this.peakConcurrent})`);
+      }
 
       const slotsAvailable =
         this.config.maxParallelAgents - this.activeAgents.size;
@@ -202,10 +213,15 @@ export class Orchestrator {
   }
 
   /**
-   * Find cards eligible for agent spawning.
+   * Find cards eligible for agent spawning, ordered breadth-first.
+   *
+   * Cards are sorted so that slots are filled by round-robining across
+   * top-level plan sections (0.1, 0.3, 0.4, 0.5, 0.7, …) before any
+   * section gets a second slot. Within a section, cards with fewer
+   * prior iterations come first (least-recently-worked).
    */
   findEligibleCards(cards: Card[]): Card[] {
-    const eligible: Card[] = [];
+    const candidates: Card[] = [];
 
     for (const card of cards) {
       if (card.status === "DONE") continue;
@@ -222,10 +238,10 @@ export class Orchestrator {
       const errors = this.errorCounts.get(card.dotPath) ?? 0;
       if (errors >= 3) continue;
 
-      eligible.push(card);
+      candidates.push(card);
     }
 
-    return eligible;
+    return breadthFirstSort(candidates, this.iterationCounts);
   }
 
   /**
@@ -300,6 +316,12 @@ export class Orchestrator {
     this.processes.set(card.dotPath, proc);
 
     this.iterationCounts.set(card.dotPath, iterNum + 1);
+
+    const concurrent = this.activeAgents.size;
+    if (concurrent > this.peakConcurrent) {
+      this.peakConcurrent = concurrent;
+      this.dashboard.log("*", `New peak concurrent agents: ${this.peakConcurrent} / ${this.config.maxParallelAgents}`);
+    }
 
     debugLog(`[${card.dotPath}] pid=${proc.pid} stdout=${!!proc.stdout} stderr=${!!proc.stderr}`);
 
@@ -550,6 +572,67 @@ export class Orchestrator {
     this.processes.clear();
     this.completionPromises.clear();
   }
+}
+
+/**
+ * Sort eligible cards breadth-first across top-level plan sections.
+ *
+ * Groups cards by their top-level section key (the first two dot-path
+ * segments, e.g. "0.1", "0.3", "0.7"). Within each group, cards are
+ * ordered by (iterationCount ASC, depth ASC, dotPath ASC) so that
+ * untouched and shallower work comes first.
+ *
+ * The groups are then interleaved round-robin, so the first N slots
+ * span N different sections before any section gets a second pick.
+ * This prevents the alphabetically-first sections from monopolising
+ * all available agent slots.
+ */
+function breadthFirstSort(
+  cards: Card[],
+  iterationCounts: Map<string, number>
+): Card[] {
+  if (cards.length === 0) return cards;
+
+  // Group by top-level section (e.g. "0.1", "0.3", "0.7")
+  const groups = new Map<string, Card[]>();
+  for (const card of cards) {
+    const parts = card.dotPath.split(".");
+    const key = parts.slice(0, 2).join(".");
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(card);
+  }
+
+  // Within each group: least-recently-worked first, then shallower, then lexicographic
+  for (const group of groups.values()) {
+    group.sort((a, b) => {
+      const ia = iterationCounts.get(a.dotPath) ?? 0;
+      const ib = iterationCounts.get(b.dotPath) ?? 0;
+      if (ia !== ib) return ia - ib;
+      const da = a.dotPath.split(".").length;
+      const db = b.dotPath.split(".").length;
+      if (da !== db) return da - db;
+      return a.dotPath.localeCompare(b.dotPath);
+    });
+  }
+
+  // Round-robin through sections (sorted by key for determinism)
+  const sectionKeys = Array.from(groups.keys()).sort();
+  const result: Card[] = [];
+  let round = 0;
+  while (result.length < cards.length) {
+    let added = 0;
+    for (const key of sectionKeys) {
+      const group = groups.get(key)!;
+      if (round < group.length) {
+        result.push(group[round]);
+        added++;
+      }
+    }
+    if (added === 0) break;
+    round++;
+  }
+
+  return result;
 }
 
 function sleep(ms: number): Promise<void> {

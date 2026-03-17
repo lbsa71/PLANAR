@@ -99,6 +99,22 @@ async function main(): Promise<void> {
     ? parseFloat(options["max-cost"])
     : Infinity;
 
+  if (isNaN(maxIterations) || maxIterations < 1) {
+    console.error(`Error: --max-iterations must be a positive integer (got: ${options["max-iterations"]})`);
+    printUsage();
+    process.exit(1);
+  }
+  if (isNaN(maxAgents) || maxAgents < 1) {
+    console.error(`Error: --max-agents must be a positive integer (got: ${options["max-agents"]})`);
+    printUsage();
+    process.exit(1);
+  }
+  if (isNaN(maxCost) || maxCost <= 0) {
+    console.error(`Error: --max-cost must be a positive number (got: ${options["max-cost"]})`);
+    printUsage();
+    process.exit(1);
+  }
+
   switch (command) {
     case "run": {
       if (!target) {
