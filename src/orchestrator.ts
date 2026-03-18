@@ -82,6 +82,8 @@ export class Orchestrator {
   private peakConcurrent = 0;
   /** Cycle counter for periodic peak logging */
   private cycleSinceLastPeakLog = 0;
+  /** Whether a cycle-breaker agent is currently running */
+  private cycleBreakInFlight = false;
 
   constructor(
     config: Partial<OrchestratorConfig> = {},
@@ -130,15 +132,26 @@ export class Orchestrator {
       const eligible = this.draining ? [] : this.findEligibleCards(cards);
 
       if (eligible.length === 0 && this.activeAgents.size === 0) {
-        staleCycles++;
-        this.dashboard.log("*", `No eligible cards. Stale cycle ${staleCycles}/${maxStaleCycles}.`);
-        if (staleCycles >= maxStaleCycles) {
-          this.dashboard.log("*", "Max stale cycles reached. Exiting.");
-          break;
+        // Before counting stale cycles, check for dependency cycles
+        const nonDone = cards.filter((c) => c.status !== "DONE" && isPhase(c.status));
+        const cycles = detectDependencyCycles(nonDone, cards);
+
+        if (cycles.length > 0 && !this.cycleBreakInFlight) {
+          this.dashboard.log("*", `Dependency cycle detected: ${cycles[0].map((c) => c.dotPath).join(" → ")}`);
+          staleCycles = 0;
+          this.cycleBreakInFlight = true;
+          this.spawnCycleBreaker(cycles[0], cards);
+        } else if (!this.cycleBreakInFlight) {
+          staleCycles++;
+          this.dashboard.log("*", `No eligible cards. Stale cycle ${staleCycles}/${maxStaleCycles}.`);
+          if (staleCycles >= maxStaleCycles) {
+            this.dashboard.log("*", "Max stale cycles reached. Exiting.");
+            break;
+          }
+          // Render once more to show stale message, then wait
+          this.dashboard.render(cards, this.activeAgents, this.iterationCounts, this.draining);
+          await sleep(2000);
         }
-        // Render once more to show stale message, then wait
-        this.dashboard.render(cards, this.activeAgents, this.iterationCounts, this.draining);
-        await sleep(2000);
         continue;
       }
 
@@ -585,6 +598,133 @@ export class Orchestrator {
     }
   }
 
+  /**
+   * Spawn a special agent to break a dependency cycle.
+   * The agent gets a system prompt explaining the cycle and instructions
+   * to edit the card files to remove the circular blocked-by links.
+   */
+  private spawnCycleBreaker(cycle: Card[], allCards: Card[]): void {
+    const cycleDesc = cycle.map((c) => `  - ${c.dotPath} "${c.title}" [${isPhase(c.status) ? c.status : formatStatus(c.status)}] (file: ${c.filePath})`).join("\n");
+    const blockedByDesc = cycle.map((c) => {
+      const deps = c.refs.blockedBy.join(", ") || "(none)";
+      return `  - ${c.dotPath}: blocked-by [${deps}]`;
+    }).join("\n");
+
+    // Find the common parent node if one exists
+    const parentPath = this.findCommonParent(cycle, allCards);
+    const parentClause = parentPath
+      ? `\nThe common parent node is: ${parentPath.filePath}\nYou may regress it to [PLAN] if re-decomposition is needed.`
+      : "";
+
+    const systemPrompt = `You are a PLANAR cycle-breaker agent.
+
+A dependency cycle has been detected that prevents any card from being eligible for processing.
+Your job is to break this cycle by editing the blocked-by frontmatter in the card files.
+
+## The Cycle
+${cycleDesc}
+
+## Current blocked-by relationships
+${blockedByDesc}
+${parentClause}
+
+## Instructions
+1. Read each card file in the cycle
+2. Analyze the actual dependencies — which cards TRULY need to wait for which others?
+3. Remove or reorder blocked-by entries to break the cycle while preserving genuine dependencies
+4. A card should only be blocked-by another card if it truly cannot start until that card is DONE
+5. If the cards can actually be worked on in parallel, remove the blocked-by entries
+6. If there's a natural ordering, keep only the forward edges and remove the back-edge(s)
+7. Update the YAML frontmatter in each affected card file
+
+## Rules
+- You MUST break the cycle — at least one blocked-by link must be removed
+- Preserve dependencies that are genuinely necessary
+- Do NOT change card statuses — only modify blocked-by frontmatter
+- Do NOT modify any files other than the card files listed above`;
+
+    const prompt = cycle.map((c) => `@${c.filePath}`).join(" ") + `\n@${this.config.rootPlanFile}\n\nBreak the dependency cycle described in your system prompt. Read the cards, determine the correct dependency ordering, and edit the blocked-by frontmatter to eliminate the cycle.`;
+
+    const slot: AgentSlot = {
+      dotPath: "*cycle-breaker",
+      cardFile: cycle[0].filePath,
+      pid: 0,
+      startedAt: new Date(),
+    };
+
+    this.activeAgents.set("*cycle-breaker", slot);
+
+    const completionPromise = new Promise<string>((resolve) => {
+      const claudePath = resolveClaudePath();
+      const spawnArgs = [
+        "--dangerously-skip-permissions",
+        "--print",
+        "--verbose",
+        "--output-format",
+        "stream-json",
+        "--system-prompt",
+        systemPrompt,
+        "--",
+        prompt,
+      ];
+
+      this.dashboard.log("*", "Spawning cycle-breaker agent");
+      const proc = this.deps.spawner.spawn(claudePath, spawnArgs, {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      slot.pid = proc.pid;
+      this.processes.set("*cycle-breaker", proc);
+
+      let stdoutBuffer = "";
+      let rateLimitInfo: RateLimitErrorInfo | null = null;
+
+      proc.stdout?.on("data", (data: Buffer) => {
+        stdoutBuffer += data.toString();
+        const { events, remainder } = parseStreamChunk(stdoutBuffer);
+        stdoutBuffer = remainder;
+        for (const event of events) {
+          rateLimitInfo = this.handleEvent("*cycle-breaker", slot, event, rateLimitInfo);
+        }
+      });
+
+      proc.stderr?.on("data", () => {});
+
+      proc.on("close", (code) => {
+        this.dashboard.log("*", `Cycle-breaker finished (exit ${code})`);
+        this.cycleBreakInFlight = false;
+        resolve("*cycle-breaker");
+      });
+
+      proc.on("error", (err) => {
+        this.dashboard.log("*", `Cycle-breaker error: ${err.message}`);
+        this.cycleBreakInFlight = false;
+        resolve("*cycle-breaker");
+      });
+    });
+
+    this.completionPromises.set("*cycle-breaker", completionPromise);
+  }
+
+  /**
+   * Find the common parent node for a set of cards.
+   */
+  private findCommonParent(cycle: Card[], allCards: Card[]): Card | null {
+    const dotPaths = cycle.map((c) => c.dotPath.split("."));
+    let commonLen = 0;
+    for (let i = 0; i < Math.min(...dotPaths.map((p) => p.length)); i++) {
+      const seg = dotPaths[0][i];
+      if (dotPaths.every((p) => p[i] === seg)) {
+        commonLen = i + 1;
+      } else {
+        break;
+      }
+    }
+    if (commonLen === 0) return null;
+    const parentDotPath = dotPaths[0].slice(0, commonLen).join(".");
+    return allCards.find((c) => c.dotPath === parentDotPath && c.isNode) ?? null;
+  }
+
   private checkAllReferences(cards: Card[]): void {
     for (const card of cards) {
       const errors = checkReferenceIntegrity(card, cards);
@@ -674,6 +814,67 @@ export class Orchestrator {
     this.processes.clear();
     this.completionPromises.clear();
   }
+}
+
+/**
+ * Detect dependency cycles among non-DONE cards.
+ * Returns an array of cycles, where each cycle is an array of cards
+ * forming a closed loop via blocked-by references.
+ */
+export function detectDependencyCycles(nonDoneCards: Card[], allCards: Card[]): Card[][] {
+  const cycles: Card[][] = [];
+  const visited = new Set<string>();
+  const inStack = new Set<string>();
+  const stack: Card[] = [];
+
+  // Build a map for quick lookup: filePath-suffix → Card
+  const cardByPath = new Map<string, Card>();
+  for (const card of allCards) {
+    cardByPath.set(card.filePath, card);
+  }
+
+  // Map dotPath → Card for non-DONE cards
+  const nonDoneByDotPath = new Map<string, Card>();
+  for (const card of nonDoneCards) {
+    nonDoneByDotPath.set(card.dotPath, card);
+  }
+
+  function dfs(card: Card): void {
+    if (visited.has(card.dotPath)) return;
+
+    inStack.add(card.dotPath);
+    stack.push(card);
+
+    for (const dep of card.refs.blockedBy) {
+      const depCard = allCards.find((c) => c.filePath.endsWith(dep));
+      if (!depCard || depCard.status === "DONE") continue;
+
+      if (inStack.has(depCard.dotPath)) {
+        // Found a cycle — extract it from the stack
+        const cycleStart = stack.findIndex((c) => c.dotPath === depCard.dotPath);
+        if (cycleStart >= 0) {
+          cycles.push(stack.slice(cycleStart));
+        }
+        return;
+      }
+
+      if (!visited.has(depCard.dotPath)) {
+        dfs(depCard);
+      }
+    }
+
+    stack.pop();
+    inStack.delete(card.dotPath);
+    visited.add(card.dotPath);
+  }
+
+  for (const card of nonDoneCards) {
+    if (!visited.has(card.dotPath)) {
+      dfs(card);
+    }
+  }
+
+  return cycles;
 }
 
 /**

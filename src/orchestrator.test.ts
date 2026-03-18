@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { Orchestrator, OrchestratorDeps } from "./orchestrator.js";
+import { Orchestrator, OrchestratorDeps, detectDependencyCycles } from "./orchestrator.js";
 import { Card, FileSystem, ProcessHandle, ProcessSpawner } from "./types.js";
 
 function makeCard(overrides: Partial<Card>): Card {
@@ -440,6 +440,93 @@ describe("Orchestrator.regressCommonParent", () => {
     orch.regressCommonParent(c1, c2, [c1, c2]);
 
     expect(Object.keys(files)).toHaveLength(0);
+  });
+});
+
+describe("detectDependencyCycles", () => {
+  it("detects a simple 3-card cycle", () => {
+    const a = makeCard({
+      dotPath: "0.5.1",
+      status: "ARCHITECT",
+      filePath: "plan/0.5.1-a.md",
+      refs: { parent: null, root: null, children: [], blockedBy: ["plan/0.5.3-c.md"] },
+    });
+    const b = makeCard({
+      dotPath: "0.5.2",
+      status: "IMPLEMENT",
+      filePath: "plan/0.5.2-b.md",
+      refs: { parent: null, root: null, children: [], blockedBy: ["plan/0.5.1-a.md"] },
+    });
+    const c = makeCard({
+      dotPath: "0.5.3",
+      status: "IMPLEMENT",
+      filePath: "plan/0.5.3-c.md",
+      refs: { parent: null, root: null, children: [], blockedBy: ["plan/0.5.2-b.md"] },
+    });
+
+    const allCards = [a, b, c];
+    const cycles = detectDependencyCycles(allCards, allCards);
+    expect(cycles.length).toBeGreaterThan(0);
+    const cyclePaths = cycles[0].map((card) => card.dotPath);
+    // All three should be in the cycle
+    expect(cyclePaths).toContain("0.5.1");
+    expect(cyclePaths).toContain("0.5.2");
+    expect(cyclePaths).toContain("0.5.3");
+  });
+
+  it("returns empty when no cycles exist", () => {
+    const a = makeCard({
+      dotPath: "1",
+      status: "IMPLEMENT",
+      filePath: "plan/1-a.md",
+      refs: { parent: null, root: null, children: [], blockedBy: [] },
+    });
+    const b = makeCard({
+      dotPath: "2",
+      status: "PLAN",
+      filePath: "plan/2-b.md",
+      refs: { parent: null, root: null, children: [], blockedBy: ["plan/1-a.md"] },
+    });
+
+    const cycles = detectDependencyCycles([a, b], [a, b]);
+    expect(cycles).toHaveLength(0);
+  });
+
+  it("ignores DONE dependencies (no false cycle)", () => {
+    const a = makeCard({
+      dotPath: "1",
+      status: "PLAN",
+      filePath: "plan/1-a.md",
+      refs: { parent: null, root: null, children: [], blockedBy: ["plan/2-b.md"] },
+    });
+    const b = makeCard({
+      dotPath: "2",
+      status: "DONE",
+      filePath: "plan/2-b.md",
+      refs: { parent: null, root: null, children: [], blockedBy: ["plan/1-a.md"] },
+    });
+
+    const nonDone = [a];
+    const cycles = detectDependencyCycles(nonDone, [a, b]);
+    expect(cycles).toHaveLength(0);
+  });
+
+  it("detects a 2-card cycle", () => {
+    const a = makeCard({
+      dotPath: "1",
+      status: "PLAN",
+      filePath: "plan/1-a.md",
+      refs: { parent: null, root: null, children: [], blockedBy: ["plan/2-b.md"] },
+    });
+    const b = makeCard({
+      dotPath: "2",
+      status: "PLAN",
+      filePath: "plan/2-b.md",
+      refs: { parent: null, root: null, children: [], blockedBy: ["plan/1-a.md"] },
+    });
+
+    const cycles = detectDependencyCycles([a, b], [a, b]);
+    expect(cycles.length).toBeGreaterThan(0);
   });
 });
 
