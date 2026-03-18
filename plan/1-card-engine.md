@@ -6,6 +6,7 @@ children:
   - plan/1.2-card-parser.md
   - plan/1.3-link-integrity.md
   - plan/1.4-guid.md
+last-integrity-check: 2026-03-18T19:45:36.629Z
 ---
 # 1 Card Engine [DONE]
 
@@ -23,3 +24,9 @@ file manifest, and acceptance criteria.
 - Finds sibling cards by dot-path prefix
 - Validates link integrity across all cards
 - Dot-path ↔ GUID conversion is deterministic and reversible
+
+## Revision History
+- 2026-03-18T19:45:36.629Z: integrity-check passed
+- 2026-03-18T19:39:43.686Z: integrity-check passed
+- 2026-03-18T19:25:29.296Z: integrity-check passed
+- 2026-03-18T19:24:28.141Z: integrity-check passed

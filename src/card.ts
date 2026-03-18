@@ -176,6 +176,12 @@ export function parseCard(
   const refs = parseReferences(raw);
   const fileManifest = parseFileManifest(raw);
 
+  const fm = parseFrontmatter(raw);
+  const lastIntegrityCheck =
+    typeof fm["last-integrity-check"] === "string"
+      ? fm["last-integrity-check"]
+      : undefined;
+
   return {
     dotPath,
     title,
@@ -185,6 +191,7 @@ export function parseCard(
     fileManifest,
     filePath,
     rawContent: raw,
+    lastIntegrityCheck,
   };
 }
 
@@ -276,6 +283,46 @@ export function findSiblings(
 /** Normalize path separators to forward slashes for cross-platform comparison */
 function normalizePath(p: string): string {
   return p.replace(/\\/g, "/");
+}
+
+/**
+ * Upsert a scalar key-value pair in YAML frontmatter.
+ * If frontmatter is absent, prepends a new block.
+ * If the key already exists, updates it in-place; otherwise appends it.
+ */
+export function updateFrontmatterKey(
+  content: string,
+  key: string,
+  value: string
+): string {
+  const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---/);
+  if (!fmMatch) {
+    return `---\n${key}: ${value}\n---\n${content}`;
+  }
+
+  const body = fmMatch[1];
+  const keyRe = new RegExp(`^${key}:.*$`, "m");
+  const newBody = keyRe.test(body)
+    ? body.replace(keyRe, `${key}: ${value}`)
+    : body.trimEnd() + `\n${key}: ${value}`;
+
+  const newFm = `---\n${newBody}\n---`;
+  return content.replace(/^---\s*\n[\s\S]*?\n---/, newFm);
+}
+
+/**
+ * Prepend a dated entry to the ## Revision History section (newest-first).
+ * Creates the section at the end of the document if absent.
+ */
+export function appendRevisionEntry(content: string, entry: string): string {
+  const headingMatch = content.match(/^## Revision History[ \t]*$/m);
+  if (headingMatch && headingMatch.index !== undefined) {
+    const headingEnd = headingMatch.index + headingMatch[0].length;
+    const after = content.slice(headingEnd);
+    const insertAt = headingEnd + (after.startsWith("\n") ? 1 : 0);
+    return content.slice(0, insertAt) + `- ${entry}\n` + content.slice(insertAt);
+  }
+  return content.trimEnd() + `\n\n## Revision History\n- ${entry}\n`;
 }
 
 export function checkReferenceIntegrity(

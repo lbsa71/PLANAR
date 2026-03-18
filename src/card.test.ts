@@ -10,6 +10,8 @@ import {
   formatStatus,
   nextLeafPhase,
   isPhase,
+  updateFrontmatterKey,
+  appendRevisionEntry,
 } from "./card.js";
 
 describe("parseStatus", () => {
@@ -322,5 +324,105 @@ describe("isPhase", () => {
 
   it("returns false for special statuses", () => {
     expect(isPhase({ kind: "BLOCKED-BY", dotPath: "1" })).toBe(false);
+  });
+});
+
+describe("updateFrontmatterKey", () => {
+  it("updates an existing key in frontmatter", () => {
+    const content = `---
+parent: plan/6-integrity.md
+root: plan/root.md
+last-integrity-check: 2026-01-01T00:00:00.000Z
+---
+# 6.1 Title [PLAN]
+`;
+    const result = updateFrontmatterKey(
+      content,
+      "last-integrity-check",
+      "2026-03-18T12:00:00.000Z"
+    );
+    expect(result).toContain(
+      "last-integrity-check: 2026-03-18T12:00:00.000Z"
+    );
+    expect(result).not.toContain("2026-01-01T00:00:00.000Z");
+    expect(result).toContain("parent: plan/6-integrity.md");
+  });
+
+  it("appends a new key to existing frontmatter", () => {
+    const content = `---
+parent: plan/6-integrity.md
+root: plan/root.md
+---
+# 6.1 Title [PLAN]
+`;
+    const result = updateFrontmatterKey(
+      content,
+      "last-integrity-check",
+      "2026-03-18T12:00:00.000Z"
+    );
+    expect(result).toContain(
+      "last-integrity-check: 2026-03-18T12:00:00.000Z"
+    );
+    expect(result).toContain("parent: plan/6-integrity.md");
+  });
+
+  it("creates frontmatter block when absent", () => {
+    const content = `# 6.1 Title [PLAN]\n\n## Description\nHello\n`;
+    const result = updateFrontmatterKey(
+      content,
+      "last-integrity-check",
+      "2026-03-18T12:00:00.000Z"
+    );
+    expect(result).toMatch(/^---\n/);
+    expect(result).toContain(
+      "last-integrity-check: 2026-03-18T12:00:00.000Z"
+    );
+    expect(result).toContain("# 6.1 Title [PLAN]");
+  });
+});
+
+describe("appendRevisionEntry", () => {
+  it("prepends entry to existing Revision History section", () => {
+    const content = `# 6.1 Title [PLAN]
+
+## Revision History
+- 2026-01-01T00:00:00.000Z: old entry
+`;
+    const result = appendRevisionEntry(
+      content,
+      "2026-03-18T12:00:00.000Z: new entry"
+    );
+    const lines = result.split("\n");
+    const histIdx = lines.findIndex((l) => l === "## Revision History");
+    expect(lines[histIdx + 1]).toBe(
+      "- 2026-03-18T12:00:00.000Z: new entry"
+    );
+    expect(result).toContain("- 2026-01-01T00:00:00.000Z: old entry");
+  });
+
+  it("creates Revision History section when absent", () => {
+    const content = `# 6.1 Title [PLAN]\n\n## Description\nHello\n`;
+    const result = appendRevisionEntry(
+      content,
+      "2026-03-18T12:00:00.000Z: created"
+    );
+    expect(result).toContain("## Revision History");
+    expect(result).toContain("- 2026-03-18T12:00:00.000Z: created");
+  });
+
+  it("new entry appears before older entries (newest-first)", () => {
+    const content = `# 6.1 Title [PLAN]
+
+## Revision History
+- 2026-01-01T00:00:00.000Z: alpha
+- 2025-12-31T00:00:00.000Z: beta
+`;
+    const result = appendRevisionEntry(
+      content,
+      "2026-03-18T12:00:00.000Z: gamma"
+    );
+    const gammaPos = result.indexOf("gamma");
+    const alphaPos = result.indexOf("alpha");
+    expect(gammaPos).toBeLessThan(alphaPos);
   });
 });

@@ -10,7 +10,9 @@ import {
   checkReferenceIntegrity,
   parseFrontmatter,
   stripFrontmatter,
+  appendRevisionEntry,
 } from "./card.js";
+import { checkTreeIntegrity, applyIntegrityResults, formatIntegrityReport } from "./integrity.js";
 import { debugLog, debugLogProcessError } from "./debug-log.js";
 import { resolveClaudePath } from "./resolve-claude.js";
 import { generateSystemPrompt } from "./system-prompt.js";
@@ -58,6 +60,7 @@ const DEFAULT_CONFIG: OrchestratorConfig = {
   maxIterationsPerCard: 50,
   rootPlanFile: "plan/root.md",
   planDir: "plan",
+  integrityIntervalSeconds: 0,
 };
 
 /**
@@ -84,6 +87,10 @@ export class Orchestrator {
   private cycleSinceLastPeakLog = 0;
   /** Whether a cycle-breaker agent is currently running */
   private cycleBreakInFlight = false;
+  /** Card status recorded just before spawning an agent, for revision history */
+  private statusBeforeSpawn: Map<string, string> = new Map();
+  /** Timestamp of last automated integrity check */
+  private lastIntegrityCheckAt: Date | null = null;
 
   constructor(
     config: Partial<OrchestratorConfig> = {},
@@ -128,6 +135,7 @@ export class Orchestrator {
 
       this.propagateConflicts(cards);
       this.checkAllReferences(cards);
+      this.maybeRunIntegrityCheck(cards);
 
       const eligible = this.draining ? [] : this.findEligibleCards(cards);
 
@@ -304,6 +312,11 @@ export class Orchestrator {
     };
 
     this.activeAgents.set(card.dotPath, slot);
+    // Record status before the agent runs so reapAgent can detect changes
+    this.statusBeforeSpawn.set(
+      card.dotPath,
+      isPhase(card.status) ? card.status : formatStatus(card.status)
+    );
 
     const concurrent = this.activeAgents.size;
     if (concurrent > this.peakConcurrent) {
@@ -538,6 +551,31 @@ export class Orchestrator {
 
   private reapAgent(dotPath: string): void {
     this.dashboard.log(dotPath, "Agent finished");
+
+    // Detect status change and write a revision history entry
+    const slot = this.activeAgents.get(dotPath);
+    const prevStatus = this.statusBeforeSpawn.get(dotPath);
+    if (slot && prevStatus) {
+      try {
+        const content = this.deps.fs.readFileSync(slot.cardFile, "utf-8");
+        const card = parseCard(slot.cardFile, content);
+        const newStatus = isPhase(card.status)
+          ? card.status
+          : formatStatus(card.status);
+        if (prevStatus !== newStatus) {
+          const ts = new Date().toISOString();
+          const updated = appendRevisionEntry(
+            content,
+            `${ts}: status ${prevStatus} → ${newStatus}`
+          );
+          this.deps.fs.writeFileSync(slot.cardFile, updated);
+        }
+      } catch {
+        // card may have been deleted or is temporarily invalid — ignore
+      }
+      this.statusBeforeSpawn.delete(dotPath);
+    }
+
     this.activeAgents.delete(dotPath);
     this.processes.delete(dotPath);
     this.completionPromises.delete(dotPath);
@@ -557,10 +595,15 @@ export class Orchestrator {
 
         if (target && isPhase(target.status)) {
           this.dashboard.log(card.dotPath, `Conflict propagated ↔ ${targetDotPath}`);
-          const updatedContent = updateCardStatus(target.rawContent, {
+          const ts = new Date().toISOString();
+          let updatedContent = updateCardStatus(target.rawContent, {
             kind: "CONFLICTS-WITH",
             dotPath: card.dotPath,
           });
+          updatedContent = appendRevisionEntry(
+            updatedContent,
+            `${ts}: CONFLICTS-WITH ${card.dotPath} propagated by orchestrator`
+          );
           this.deps.fs.writeFileSync(target.filePath, updatedContent);
 
           this.regressCommonParent(card, target, cards);
@@ -592,7 +635,12 @@ export class Orchestrator {
 
     if (parent && parent.status === "DONE") {
       this.dashboard.log(parentPath, `Regressed to [PLAN] — conflict between ${card1.dotPath} and ${card2.dotPath}`);
+      const ts = new Date().toISOString();
       let content = updateCardStatus(parent.rawContent, "PLAN");
+      content = appendRevisionEntry(
+        content,
+        `${ts}: regressed to PLAN — conflict between ${card1.dotPath} and ${card2.dotPath}`
+      );
       content += `\n\n## Conflict Note\nCards ${card1.dotPath} and ${card2.dotPath} are in conflict. Re-decomposition needed.\n`;
       this.deps.fs.writeFileSync(parent.filePath, content);
     }
@@ -733,6 +781,53 @@ ${parentClause}
           `[orchestrator] Link integrity issues in ${card.dotPath}:\n  ${errors.join("\n  ")}`
         );
       }
+    }
+  }
+
+  /**
+   * Run a full integrity check if enough time has elapsed since the last one.
+   * Applies results (timestamps + revision history) to all card files.
+   * Triggers immediately if structural issues are detected even before the
+   * interval has elapsed.
+   */
+  private maybeRunIntegrityCheck(cards: Card[]): void {
+    const intervalMs = (this.config.integrityIntervalSeconds ?? 0) * 1000;
+    if (intervalMs <= 0) return;
+
+    const now = Date.now();
+    const elapsed = this.lastIntegrityCheckAt
+      ? now - this.lastIntegrityCheckAt.getTime()
+      : Infinity;
+
+    if (elapsed < intervalMs) return;
+
+    this.lastIntegrityCheckAt = new Date(now);
+    this.dashboard.log("*", "Running automated integrity check…");
+
+    const report = checkTreeIntegrity(cards, process.cwd(), {
+      scanSourceDir: "src",
+      fs: {
+        existsSync: (p: string) => this.deps.fs.existsSync(p),
+      },
+    });
+
+    const { updated, regressed } = applyIntegrityResults(
+      report,
+      cards,
+      { regressProblematic: true },
+      this.deps.fs
+    );
+
+    const issueCount =
+      report.cardIssues.length + report.complianceIssues.length;
+    this.dashboard.log(
+      "*",
+      `Integrity check: ${issueCount} issue(s), ${updated} card(s) updated` +
+        (regressed.length > 0 ? `, regressed: ${regressed.join(", ")}` : "")
+    );
+
+    if (issueCount > 0) {
+      this.dashboard.log("*", formatIntegrityReport(report));
     }
   }
 

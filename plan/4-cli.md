@@ -1,6 +1,7 @@
 ---
 parent: plan/root.md
 root: plan/root.md
+last-integrity-check: 2026-03-18T19:45:36.629Z
 ---
 # 4 CLI [DONE]
 
@@ -23,3 +24,9 @@ See @README.md — "Working Directory" section.
 - `--interval`, `--branch` flags accepted for watch mode
 - `--help` prints usage
 - Dot-path sorting in status output
+
+## Revision History
+- 2026-03-18T19:45:36.629Z: integrity-check — 1 issue(s): duplicate-file-ownership
+- 2026-03-18T19:39:43.686Z: integrity-check — 1 issue(s): duplicate-file-ownership
+- 2026-03-18T19:25:29.296Z: integrity-check — 1 issue(s): duplicate-file-ownership
+- 2026-03-18T19:24:28.141Z: integrity-check — 1 issue(s): duplicate-file-ownership

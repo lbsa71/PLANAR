@@ -530,6 +530,104 @@ describe("detectDependencyCycles", () => {
   });
 });
 
+describe("Orchestrator revision history entries", () => {
+  it("propagateConflicts appends revision entry to target card", () => {
+    const files: Record<string, string> = {};
+    const fs = makeMockFs(files);
+    const orch = new Orchestrator({}, { fs, spawner: makeMockSpawner() });
+
+    const conflicting = makeCard({
+      dotPath: "2.1",
+      status: { kind: "CONFLICTS-WITH", dotPath: "2.3" },
+      filePath: "plan/2.1-foo.md",
+      rawContent: "# 2.1 Foo [CONFLICTS-WITH 2.3]\n",
+    });
+    const target = makeCard({
+      dotPath: "2.3",
+      status: "IMPLEMENT",
+      filePath: "plan/2.3-bar.md",
+      rawContent: "# 2.3 Bar [IMPLEMENT]\n",
+    });
+
+    orch.propagateConflicts([conflicting, target]);
+
+    const written = files["plan/2.3-bar.md"];
+    expect(written).toContain("## Revision History");
+    expect(written).toContain("CONFLICTS-WITH 2.1 propagated by orchestrator");
+  });
+
+  it("regressCommonParent appends revision entry to parent card", () => {
+    const files: Record<string, string> = {};
+    const fs = makeMockFs(files);
+    const orch = new Orchestrator({}, { fs, spawner: makeMockSpawner() });
+
+    const parent = makeCard({
+      dotPath: "3",
+      status: "DONE",
+      filePath: "plan/3-parent.md",
+      rawContent: "# 3 Parent [DONE]\n## Description\nParent card.\n",
+    });
+    const c1 = makeCard({ dotPath: "3.1" });
+    const c2 = makeCard({ dotPath: "3.2" });
+
+    orch.regressCommonParent(c1, c2, [parent, c1, c2]);
+
+    const written = files["plan/3-parent.md"];
+    expect(written).toContain("## Revision History");
+    expect(written).toContain("regressed to PLAN — conflict between 3.1 and 3.2");
+  });
+
+  it("reapAgent appends revision entry when card status changed", () => {
+    const files: Record<string, string> = {
+      "plan/1-foo.md":
+        "---\nroot: plan/root.md\n---\n# 1 Foo [IMPLEMENT]\n\n## Revision History\n",
+    };
+    const fs = makeMockFs(files);
+    const orch = new Orchestrator({}, { fs, spawner: makeMockSpawner() });
+
+    const slot = {
+      dotPath: "1",
+      cardFile: "plan/1-foo.md",
+      pid: 0,
+      startedAt: new Date(),
+    };
+    // Simulate: agent was spawned when card was PLAN, now file says IMPLEMENT
+    (orch as any).activeAgents.set("1", slot);
+    (orch as any).statusBeforeSpawn.set("1", "PLAN");
+
+    (orch as any).reapAgent("1");
+
+    const written = files["plan/1-foo.md"];
+    expect(written).toContain("## Revision History");
+    expect(written).toMatch(/status PLAN → IMPLEMENT/);
+  });
+
+  it("reapAgent does NOT append revision entry when status unchanged", () => {
+    const originalContent =
+      "---\nroot: plan/root.md\n---\n# 1 Foo [PLAN]\n\n## Revision History\n";
+    const files: Record<string, string> = {
+      "plan/1-foo.md": originalContent,
+    };
+    const fs = makeMockFs(files);
+    const orch = new Orchestrator({}, { fs, spawner: makeMockSpawner() });
+
+    const slot = {
+      dotPath: "1",
+      cardFile: "plan/1-foo.md",
+      pid: 0,
+      startedAt: new Date(),
+    };
+    // Status before and after are both PLAN
+    (orch as any).activeAgents.set("1", slot);
+    (orch as any).statusBeforeSpawn.set("1", "PLAN");
+
+    (orch as any).reapAgent("1");
+
+    // File should NOT have been rewritten (no status change)
+    expect(files["plan/1-foo.md"]).toBe(originalContent);
+  });
+});
+
 // Note: handleAgentOutput was replaced by inline stream-json parsing.
 // See stream-parser.test.ts for event parsing tests.
 

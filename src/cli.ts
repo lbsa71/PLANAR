@@ -16,6 +16,11 @@ import { fetchDetectPull } from "./git-ops.js";
 import { findAffectedCards, createImpactCard } from "./impact.js";
 import { invalidateCards } from "./invalidation.js";
 import { debugLogBanner } from "./debug-log.js";
+import {
+  checkTreeIntegrity,
+  applyIntegrityResults,
+  formatIntegrityReport,
+} from "./integrity.js";
 import type { CardStatus, GitRunner, FileSystem } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -46,18 +51,23 @@ Usage:
   planar <card-file>              Run the Ralph Wiggum loop on a single card
   planar orchestrate <root-file>  Run full orchestration with parallel agents
   planar status [plan-dir]        Show status of all cards
+  planar integrity [plan-dir]     Check tree integrity and codebase compliance
   planar watch [plan-dir]         Git watch mode — monitor upstream for changes
 
 Options:
-  --cwd <dir>              Set working directory (default: current directory)
-  --max-iterations <n>     Max iterations per card (default: 50)
-  --max-agents <n>         Max parallel agents (default: 8)
-  --max-cost <dollars>     Max cost budget in dollars (default: unlimited)
-  --plan-dir <dir>         Plan directory (default: plan)
-  --root <file>            Root plan file (default: plan/root.md)
-  --interval <seconds>     Git watch poll interval (default: 30)
-  --branch <name>          Git watch branch to track
-  --help                   Show this help message`);
+  --cwd <dir>                    Set working directory (default: current directory)
+  --max-iterations <n>           Max iterations per card (default: 50)
+  --max-agents <n>               Max parallel agents (default: 8)
+  --max-cost <dollars>           Max cost budget in dollars (default: unlimited)
+  --plan-dir <dir>               Plan directory (default: plan)
+  --root <file>                  Root plan file (default: plan/root.md)
+  --integrity-interval <secs>    Integrity check interval during orchestration (default: 0/disabled)
+  --interval <seconds>           Git watch poll interval (default: 30)
+  --branch <name>                Git watch branch to track
+  --regress                      (integrity) Regress DONE cards with issues to PLAN/REVIEW
+  --no-scan-src                  (integrity) Skip unowned source file detection
+  --src-dir <dir>                (integrity) Source directory to scan (default: src)
+  --help                         Show this help message`);
 }
 
 function parseArgs(args: string[]): {
@@ -83,7 +93,7 @@ function parseArgs(args: string[]): {
         i++;
       }
     } else if (!command) {
-      if (arg === "orchestrate" || arg === "status" || arg === "watch") {
+      if (arg === "orchestrate" || arg === "status" || arg === "watch" || arg === "integrity") {
         command = arg;
       } else {
         command = "run";
@@ -126,6 +136,7 @@ async function main(): Promise<void> {
   const maxCost = options["max-cost"]
     ? parseFloat(options["max-cost"])
     : Infinity;
+  const integrityInterval = parseInt(options["integrity-interval"] ?? "0", 10);
 
   if (isNaN(maxIterations) || maxIterations < 1) {
     console.error(`Error: --max-iterations must be a positive integer (got: ${options["max-iterations"]})`);
@@ -171,6 +182,7 @@ async function main(): Promise<void> {
         maxIterationsPerCard: maxIterations,
         rootPlanFile,
         planDir,
+        integrityIntervalSeconds: integrityInterval,
       });
       await orchestrator.run();
       break;
@@ -263,6 +275,39 @@ async function main(): Promise<void> {
       console.log(
         `\n${done}/${cards.length} done — ${nodes} nodes, ${leaves} leaves`
       );
+      break;
+    }
+
+    case "integrity": {
+      const dir = target || planDir;
+      const shouldRegress = options["regress"] === "true";
+      const scanSrc = options["no-scan-src"] !== "true";
+      const srcDir = options["src-dir"] ?? "src";
+
+      const cards = discoverCards(dir);
+      if (cards.length === 0) {
+        console.log(`No cards found in ${dir}/`);
+        break;
+      }
+
+      const report = checkTreeIntegrity(cards, process.cwd(), {
+        scanSourceDir: scanSrc ? srcDir : undefined,
+      });
+
+      console.log(formatIntegrityReport(report));
+
+      console.log("\nUpdating cards (last-integrity-check + revision history)…");
+      const { updated, regressed } = applyIntegrityResults(
+        report,
+        cards,
+        { regressProblematic: shouldRegress },
+        nodeFs
+      );
+      console.log(`Updated ${updated} card(s).`);
+      if (regressed.length > 0) {
+        console.log("Regressed:");
+        for (const r of regressed) console.log(`  ${r}`);
+      }
       break;
     }
 

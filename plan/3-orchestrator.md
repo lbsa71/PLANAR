@@ -5,6 +5,7 @@ children:
   - plan/3.1-agent-spawning.md
   - plan/3.2-conflict-propagation.md
   - plan/3.3-top-down-enforcement.md
+last-integrity-check: 2026-03-18T19:45:36.629Z
 ---
 # 3 Orchestrator [DONE]
 
@@ -22,3 +23,9 @@ See @README.md — "Orchestrator" and "Parallel Execution & Session Model" secti
 - Conflict propagation: mirrors CONFLICTS-WITH, regresses common parent
 - Stale cycle detection: exits after 3 cycles with no eligible cards
 - ProcessSpawner injected for testability
+
+## Revision History
+- 2026-03-18T19:45:36.629Z: integrity-check passed
+- 2026-03-18T19:39:43.686Z: integrity-check passed
+- 2026-03-18T19:25:29.296Z: integrity-check passed
+- 2026-03-18T19:24:28.141Z: integrity-check passed

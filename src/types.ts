@@ -39,6 +39,8 @@ export interface Card {
   filePath: string;
   /** Raw markdown content */
   rawContent: string;
+  /** ISO 8601 timestamp of last integrity check, from frontmatter */
+  lastIntegrityCheck?: string;
 }
 
 /** Plan operation types */
@@ -89,6 +91,45 @@ export interface OrchestratorConfig {
   maxIterationsPerCard: number;
   rootPlanFile: string;
   planDir: string;
+  /** Interval in seconds between automated integrity checks during orchestration (0 = disabled) */
+  integrityIntervalSeconds: number;
+}
+
+// ---------------------------------------------------------------------------
+// Integrity check types
+// ---------------------------------------------------------------------------
+
+export type IssueKind =
+  | "broken-parent-link"
+  | "parent-not-in-children"
+  | "broken-child-link"
+  | "child-missing-parent-ref"
+  | "status-inconsistency"
+  | "missing-manifest-file"
+  | "duplicate-file-ownership";
+
+export type SuggestedAction = "regress-to-plan" | "regress-to-review" | "flag-only";
+
+export interface IntegrityIssue {
+  dotPath: string;
+  filePath: string;
+  kind: IssueKind;
+  message: string;
+  suggestedAction: SuggestedAction;
+}
+
+export interface ComplianceIssue {
+  kind: "unowned-source-file";
+  file: string;
+  message: string;
+}
+
+export interface IntegrityReport {
+  timestamp: string;
+  cardIssues: IntegrityIssue[];
+  complianceIssues: ComplianceIssue[];
+  scannedCards: number;
+  manifestFilesChecked: number;
 }
 
 /** The LEAF_PHASES in order for progression checks */
