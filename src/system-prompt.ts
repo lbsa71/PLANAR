@@ -1,11 +1,126 @@
 import { Card, LeafPhase } from "./types.js";
 import { isPhase } from "./card.js";
+import { parseCardSections } from "./section-parser.js";
+import {
+  IFACE_KEYWORDS,
+  CHOICE_KEYWORDS,
+  THRESHOLD_KEYWORDS,
+  FLOW_KEYWORDS,
+} from "./gate-checks.js";
+
+/**
+ * Build a human-readable artifact inventory from the card's current content.
+ * Shows which sections are present, missing, or incomplete so the agent
+ * knows exactly what needs work without re-reading the card.
+ */
+export function buildArtifactInventory(card: Card): string {
+  const sections = parseCardSections(card.rawContent);
+  const lines: string[] = [
+    "## Artifact Inventory (auto-detected from current card content)",
+    "| Section | Status |",
+    "|---|---|",
+  ];
+
+  // Description
+  if (sections.description.present) {
+    lines.push(`| Description | Present (${sections.description.wordCount} words) |`);
+  } else {
+    lines.push("| Description | **Missing** |");
+  }
+
+  // Decision
+  if (sections.decision.present) {
+    const subs = sections.decision.subsections;
+    const subStatus = [
+      `Context: ${subs.context ? "yes" : "**no**"}`,
+      `Options: ${subs.optionsConsidered ? `yes (${sections.decision.optionCount})` : "**no**"}`,
+      `Choice: ${subs.choice ? "yes" : "**no**"}`,
+      `Rationale: ${subs.rationale ? "yes" : "**no**"}`,
+      `Consequences: ${subs.consequences ? "yes" : "**no**"}`,
+    ].join(", ");
+    lines.push(`| Decision | Present (${subStatus}) |`);
+  } else {
+    lines.push("| Decision | Not present |");
+  }
+
+  // Contracts
+  if (sections.contracts.present) {
+    const subs = sections.contracts.subsections;
+    const bullets = sections.contracts.subsectionBullets;
+    const subStatus = [
+      `Preconditions: ${subs.preconditions ? `yes (${bullets.preconditions} bullets)` : "**no**"}`,
+      `Postconditions: ${subs.postconditions ? `yes (${bullets.postconditions} bullets)` : "**no**"}`,
+      `Invariants: ${subs.invariants ? `yes (${bullets.invariants} bullets)` : "**no**"}`,
+    ].join(", ");
+    lines.push(`| Contracts | Present (${subStatus}) |`);
+  } else {
+    lines.push("| Contracts | Not present |");
+  }
+
+  // Threshold Registry
+  if (sections.thresholdRegistry.present) {
+    const rowCount = sections.thresholdRegistry.rows.length;
+    const cellStatus = sections.thresholdRegistry.hasEmptyCells ? ", **has empty cells**" : ", complete";
+    lines.push(`| Threshold Registry | Present (${rowCount} rows${cellStatus}) |`);
+  } else {
+    lines.push("| Threshold Registry | Not present |");
+  }
+
+  // Behavioral Spec
+  const bsParts: string[] = [];
+  if (sections.behavioralSpec.inlineDetected) bsParts.push("inline GWT detected");
+  if (sections.behavioralSpec.linkedFeatureFiles.length > 0) {
+    bsParts.push(`${sections.behavioralSpec.linkedFeatureFiles.length} linked .feature file(s)`);
+  }
+  lines.push(`| Behavioral Spec | ${bsParts.length > 0 ? bsParts.join(", ") : "Not present"} |`);
+
+  // File Manifest & AC
+  lines.push(`| File Manifest | ${card.fileManifest.length} entries |`);
+  const acBullets = (card.rawContent.match(/^## Acceptance Criteria\s*\n([\s\S]*?)(?=\n## |\n*$)/m)?.[1] ?? "")
+    .split("\n").filter((l) => /^\s*- /.test(l)).length;
+  lines.push(`| Acceptance Criteria | ${acBullets} bullets |`);
+
+  // Action needed — pre-compute what the gate would flag
+  const descText = sections.description.present
+    ? (card.rawContent.match(/^## Description\s*\n([\s\S]*?)(?=\n## |\n*$)/m)?.[1] ?? "")
+    : "";
+  const actions: string[] = [];
+  if (IFACE_KEYWORDS.test(descText) && !sections.contracts.present) {
+    actions.push("Add **Contracts** section (Description mentions interface/API/type keywords)");
+  }
+  if (CHOICE_KEYWORDS.test(descText) && !sections.decision.present) {
+    actions.push("Add **Decision** section (Description mentions choice/pattern keywords)");
+  }
+  if (THRESHOLD_KEYWORDS.test(descText) && !sections.thresholdRegistry.present) {
+    actions.push("Add **Threshold Registry** section (Description mentions threshold/constant keywords)");
+  }
+  if (FLOW_KEYWORDS.test(descText) && !sections.behavioralSpec.inlineDetected && sections.behavioralSpec.linkedFeatureFiles.length === 0) {
+    actions.push("Add **Behavioral Spec** (Description mentions flow/algorithm keywords)");
+  }
+  if (sections.description.present && sections.description.wordCount < 10) {
+    actions.push("Expand **Description** (minimum 10 words)");
+  }
+  if (sections.decision.present && sections.decision.optionCount < 2) {
+    actions.push("Add more options to **Decision → Options Considered** (minimum 2)");
+  }
+
+  if (actions.length > 0) {
+    lines.push("");
+    lines.push("**Action needed to pass gate:**");
+    for (const a of actions) {
+      lines.push(`- ${a}`);
+    }
+  }
+
+  return lines.join("\n");
+}
 
 /**
  * Generate the system prompt for a given card based on its current phase.
  * @param gateContext - Optional gate violation context from the previous iteration.
+ * @param artifactInventory - Optional pre-computed artifact inventory string.
  */
-export function generateSystemPrompt(card: Card, rootPlanFile: string, gateContext?: string): string {
+export function generateSystemPrompt(card: Card, rootPlanFile: string, gateContext?: string, artifactInventory?: string): string {
   const phase = isPhase(card.status) ? card.status : null;
   const isNode = card.isNode;
 
@@ -25,6 +140,7 @@ Root plan file is: ${rootPlanFile}
 - If you discover an error, create a new card for it and exit — don't fix silently
 - All card links in YAML frontmatter must remain valid — broken links are bugs
 - Discover sibling cards by scanning plan/ for files sharing your dot-path prefix (e.g. plan/${card.dotPath.split(".")[0]}.*)
+- When working on a regressed card (status moved backward), re-evaluate ALL existing content from scratch. Do not re-advance without verifying that every section is still correct and complete.
 
 ## Challenging a Status
 Any status — including [DONE] — can be regressed to an earlier phase. But a challenge MUST satisfy BOTH conditions:
@@ -60,6 +176,10 @@ Card links (parent, root, children, blocked-by) go in YAML frontmatter. The head
     ? `\n\n## Gate Violations from Previous Iteration\n${gateContext}`
     : "";
 
+  const inventorySection = artifactInventory
+    ? `\n\n${artifactInventory}`
+    : "";
+
   if (isNode) {
     return `${preamble}
 
@@ -79,7 +199,7 @@ This card is a LEAF (no children: in frontmatter). Leaves go through the full ph
 Leaf lifecycle: PLAN → ARCHITECT → IMPLEMENT → REVIEW → DONE
 
 ## Current Phase: [${phase ?? formatSpecialStatus(card.status)}]
-${getLeafPhasePrompt(phase)}${gateSection}`;
+${getLeafPhasePrompt(phase)}${inventorySection}${gateSection}`;
 }
 
 function getNodeTaskPrompt(phase: string | null): string {
@@ -114,11 +234,19 @@ When planning is complete, advance status to [ARCHITECT].
 If this card needs children, use Hierarchize — it will become a node.
 
 ### Exit Criteria (gate to ARCHITECT)
-1. Description is present and non-empty
+1. Description is present, non-empty, and has at least 10 words
 2. At least one Acceptance Criterion exists
 3. Each Acceptance Criterion is testable (contains a verifiable predicate, not vague language)
 4. If the card is too large for one implementation pass, it has been split
 5. \`blocked-by\` dependencies (if any) reference valid card paths
+
+### Artifact Anticipation
+Before advancing to [ARCHITECT], consider which artifact sections will be needed:
+- Will this card require a design choice among alternatives? → Decision section
+- Will this card define or modify interfaces, types, or APIs? → Contracts section
+- Will this card introduce numeric constants? → Threshold Registry
+- Will this card specify multi-step processes or state machines? → Behavioral Spec
+Write a Description that accurately names what this card does — the automated gates use Description keywords to determine required sections.
 
 ### Isolation
 During [PLAN], you may read \`plan/**\`, \`src/**\`, \`docs/**\`. You may write \`plan/<own-card>.md\` and \`plan/<new-child-cards>.md\`. Do NOT write to src/ or docs/.`;
@@ -128,7 +256,7 @@ During [PLAN], you may read \`plan/**\`, \`src/**\`, \`docs/**\`. You may write 
 Capture every design decision and contract so IMPLEMENT is purely mechanical.
 
 ### Artifact Sections to Author
-Determine which sections are needed using the "When Required" rules, then write each using the content template from artifact-taxonomy-ARCHITECTURE.md:
+Author all applicable sections below. The automated gate will **block** your transition to IMPLEMENT if required sections are missing or incomplete. Check the Artifact Inventory below to see what exists and what the gate expects.
 1. **Decision** — if card selects a design pattern, library, data structure, algorithm, or technology from among alternatives. Must include: Context, Options Considered (≥2), Choice, Rationale, Consequences.
 2. **Contracts** — if card defines or modifies an interface, API surface, or exported type. Must include: Preconditions, Postconditions, Invariants.
 3. **Threshold Registry** — if card introduces numeric constants affecting system behavior. Must include table with: Name, Value, Unit, Valid Range, Rationale, Sensitivity.

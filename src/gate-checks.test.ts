@@ -160,7 +160,7 @@ describe("checkArchitectToImplement", () => {
         "# 99 Test [ARCHITECT]",
         "",
         "## Description",
-        "This card builds a widget.",
+        "This card builds a widget component that renders data in the dashboard view.",
         "",
         "## File Manifest",
         "- src/widget.ts",
@@ -201,7 +201,7 @@ describe("checkArchitectToImplement", () => {
         "# 99 Test [ARCHITECT]",
         "",
         "## Description",
-        "Define the interface for the parser.",
+        "Define the interface for the parser module that transforms raw input into structured output.",
         "",
         "## File Manifest",
         "- src/parser.ts",
@@ -305,12 +305,15 @@ describe("checkArchitectToImplement", () => {
         "# 99 Test [ARCHITECT]",
         "",
         "## Description",
-        "Select the best approach for caching.",
+        "Select the best approach for caching data in the application layer.",
         "",
         "## File Manifest",
         "- src/cache.ts",
         "",
         "## Decision",
+        "",
+        "### Context",
+        "We need a caching layer for frequently accessed data.",
         "",
         "### Options Considered",
         "- Redis",
@@ -321,6 +324,9 @@ describe("checkArchitectToImplement", () => {
         "",
         "### Rationale",
         "Better ecosystem support.",
+        "",
+        "### Consequences",
+        "- Adds Redis as a runtime dependency.",
       ].join("\n"),
       fileManifest: ["src/cache.ts"],
     });
@@ -354,7 +360,7 @@ describe("checkArchitectToImplement", () => {
     const subsectionViolations = result.violations.filter(
       (v) => v.check === "decision-subsection-missing",
     );
-    expect(subsectionViolations.length).toBe(3);
+    expect(subsectionViolations.length).toBe(5);
   });
 
   it("fails with threshold-registry-required when Description mentions 'timeout' but no Threshold Registry", () => {
@@ -388,7 +394,7 @@ describe("checkArchitectToImplement", () => {
         "# 99 Test [ARCHITECT]",
         "",
         "## Description",
-        "Set the default timeout limits.",
+        "Set the default timeout limits for all network requests and background job processing.",
         "",
         "## File Manifest",
         "- src/config.ts",
@@ -440,7 +446,7 @@ describe("checkArchitectToImplement", () => {
         "# 99 Test [ARCHITECT]",
         "",
         "## Description",
-        "Implement the state transition logic.",
+        "Implement the state transition logic that governs how agents move between processing phases.",
         "",
         "## File Manifest",
         "- src/state.ts",
@@ -464,7 +470,7 @@ describe("checkArchitectToImplement", () => {
         "# 99 Test [ARCHITECT]",
         "",
         "## Description",
-        "Implement the sequence of operations.",
+        "Implement the sequence of operations that processes incoming data through the pipeline stages.",
         "",
         "## File Manifest",
         "- src/ops.ts",
@@ -489,7 +495,7 @@ describe("checkArchitectToImplement", () => {
         "# 99 Test [ARCHITECT]",
         "",
         "## Description",
-        "Define the INTERFACE and SCHEMA for the system.",
+        "Define the INTERFACE and SCHEMA for the system configuration and data processing pipeline.",
         "",
         "## File Manifest",
         "- src/system.ts",
@@ -687,5 +693,246 @@ describe("checkReviewToDone", () => {
 
     const result = checkReviewToDone(card);
     expect(result.pass).toBe(true);
+  });
+});
+
+// ── Depth checks ──────────────────────────────────────────────
+
+describe("depth checks in checkArchitectToImplement", () => {
+  it("fails description-depth when Description has fewer than 10 words", () => {
+    const card = makeCard({
+      rawContent: [
+        "---",
+        "root: plan/root.md",
+        "---",
+        "# 99 Test [ARCHITECT]",
+        "",
+        "## Description",
+        "Too short.",
+        "",
+        "## File Manifest",
+        "- src/foo.ts",
+      ].join("\n"),
+      fileManifest: ["src/foo.ts"],
+    });
+
+    const result = checkArchitectToImplement(card);
+    expect(hasViolation(result, "description-depth")).toBe(true);
+  });
+
+  it("passes description-depth when Description has 10+ words", () => {
+    const card = makeCard({
+      rawContent: [
+        "---",
+        "root: plan/root.md",
+        "---",
+        "# 99 Test [ARCHITECT]",
+        "",
+        "## Description",
+        "This card implements a comprehensive widget system for rendering data in dashboards.",
+        "",
+        "## File Manifest",
+        "- src/foo.ts",
+      ].join("\n"),
+      fileManifest: ["src/foo.ts"],
+    });
+
+    const result = checkArchitectToImplement(card);
+    expect(hasViolation(result, "description-depth")).toBe(false);
+  });
+
+  it("fails decision-option-count when Options Considered has fewer than 2 bullets", () => {
+    const card = makeCard({
+      rawContent: [
+        "---",
+        "root: plan/root.md",
+        "---",
+        "# 99 Test [ARCHITECT]",
+        "",
+        "## Description",
+        "Select the best approach for handling data persistence in the application layer.",
+        "",
+        "## File Manifest",
+        "- src/cache.ts",
+        "",
+        "## Decision",
+        "",
+        "### Context",
+        "Need caching.",
+        "",
+        "### Options Considered",
+        "- Redis only",
+        "",
+        "### Choice",
+        "Redis",
+        "",
+        "### Rationale",
+        "It works.",
+        "",
+        "### Consequences",
+        "- Adds dependency.",
+      ].join("\n"),
+      fileManifest: ["src/cache.ts"],
+    });
+
+    const result = checkArchitectToImplement(card);
+    expect(hasViolation(result, "decision-option-count")).toBe(true);
+  });
+
+  it("passes decision-option-count with 2+ options", () => {
+    const card = makeCard({
+      rawContent: [
+        "---",
+        "root: plan/root.md",
+        "---",
+        "# 99 Test [ARCHITECT]",
+        "",
+        "## Description",
+        "Select the best approach for handling data persistence in the application layer.",
+        "",
+        "## File Manifest",
+        "- src/cache.ts",
+        "",
+        "## Decision",
+        "",
+        "### Context",
+        "Need caching.",
+        "",
+        "### Options Considered",
+        "- Redis",
+        "- Memcached",
+        "",
+        "### Choice",
+        "Redis",
+        "",
+        "### Rationale",
+        "Better support.",
+        "",
+        "### Consequences",
+        "- Adds dependency.",
+      ].join("\n"),
+      fileManifest: ["src/cache.ts"],
+    });
+
+    const result = checkArchitectToImplement(card);
+    expect(hasViolation(result, "decision-option-count")).toBe(false);
+  });
+
+  it("fails contracts-subsection-depth when subsection has 0 bullets", () => {
+    const card = makeCard({
+      rawContent: [
+        "---",
+        "root: plan/root.md",
+        "---",
+        "# 99 Test [ARCHITECT]",
+        "",
+        "## Description",
+        "Define the interface for the data parser that handles structured input transformation.",
+        "",
+        "## File Manifest",
+        "- src/parser.ts",
+        "",
+        "## Contracts",
+        "",
+        "### Preconditions",
+        "TBD",
+        "",
+        "### Postconditions",
+        "- Output is correct",
+        "",
+        "### Invariants",
+        "- State is consistent",
+      ].join("\n"),
+      fileManifest: ["src/parser.ts"],
+    });
+
+    const result = checkArchitectToImplement(card);
+    expect(hasViolation(result, "contracts-subsection-depth")).toBe(true);
+  });
+
+  it("passes contracts-subsection-depth when all subsections have bullets", () => {
+    const card = makeCard({
+      rawContent: [
+        "---",
+        "root: plan/root.md",
+        "---",
+        "# 99 Test [ARCHITECT]",
+        "",
+        "## Description",
+        "Define the interface for the data parser that handles structured input transformation.",
+        "",
+        "## File Manifest",
+        "- src/parser.ts",
+        "",
+        "## Contracts",
+        "",
+        "### Preconditions",
+        "- Input is valid",
+        "",
+        "### Postconditions",
+        "- Output is correct",
+        "",
+        "### Invariants",
+        "- State is consistent",
+      ].join("\n"),
+      fileManifest: ["src/parser.ts"],
+    });
+
+    const result = checkArchitectToImplement(card);
+    expect(hasViolation(result, "contracts-subsection-depth")).toBe(false);
+  });
+
+  it("fails threshold-empty-cells when a Threshold Registry row has empty cells", () => {
+    const card = makeCard({
+      rawContent: [
+        "---",
+        "root: plan/root.md",
+        "---",
+        "# 99 Test [ARCHITECT]",
+        "",
+        "## Description",
+        "Configure the timeout values and connection limits for all external service calls.",
+        "",
+        "## File Manifest",
+        "- src/config.ts",
+        "",
+        "## Threshold Registry",
+        "",
+        "| Name | Value | Unit | Valid Range | Rationale | Sensitivity |",
+        "|---|---|---|---|---|---|",
+        "| TIMEOUT | 30 |  | --- | TBD | --- |",
+      ].join("\n"),
+      fileManifest: ["src/config.ts"],
+    });
+
+    const result = checkArchitectToImplement(card);
+    expect(hasViolation(result, "threshold-empty-cells")).toBe(true);
+  });
+
+  it("passes threshold-empty-cells when all cells are filled", () => {
+    const card = makeCard({
+      rawContent: [
+        "---",
+        "root: plan/root.md",
+        "---",
+        "# 99 Test [ARCHITECT]",
+        "",
+        "## Description",
+        "Configure the timeout values and connection limits for all external service calls.",
+        "",
+        "## File Manifest",
+        "- src/config.ts",
+        "",
+        "## Threshold Registry",
+        "",
+        "| Name | Value | Unit | Valid Range | Rationale | Sensitivity |",
+        "|---|---|---|---|---|---|",
+        "| TIMEOUT | 30 | seconds | 1-300 | Standard UX | Medium |",
+      ].join("\n"),
+      fileManifest: ["src/config.ts"],
+    });
+
+    const result = checkArchitectToImplement(card);
+    expect(hasViolation(result, "threshold-empty-cells")).toBe(false);
   });
 });

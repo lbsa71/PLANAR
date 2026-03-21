@@ -1,7 +1,12 @@
 /** Result of parsing a card's artifact sections */
 export interface SectionParseResult {
+  description: {
+    present: boolean;
+    wordCount: number;
+  };
   decision: {
     present: boolean;
+    optionCount: number;
     subsections: {
       context: boolean;
       optionsConsidered: boolean;
@@ -17,10 +22,16 @@ export interface SectionParseResult {
       postconditions: boolean;
       invariants: boolean;
     };
+    subsectionBullets: {
+      preconditions: number;
+      postconditions: number;
+      invariants: number;
+    };
   };
   thresholdRegistry: {
     present: boolean;
     rows: ThresholdRow[];
+    hasEmptyCells: boolean;
   };
   behavioralSpec: {
     inlineDetected: boolean;
@@ -47,6 +58,7 @@ export function parseCardSections(rawContent: string): SectionParseResult {
   const sections = splitSections(body);
 
   return {
+    description: parseDescription(sections),
     decision: parseDecision(sections),
     contracts: parseContracts(sections),
     thresholdRegistry: parseThresholdRegistry(sections),
@@ -102,11 +114,53 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/** Count bullet lines (`- ` or `* ` prefixed, possibly indented) */
+function countBullets(text: string): number {
+  return text.split("\n").filter((l) => /^\s*[-*] /.test(l)).length;
+}
+
+/** Count words in text, excluding heading lines (### ...) */
+function countWords(text: string): number {
+  const lines = text.split("\n").filter((l) => !l.match(/^#{1,6}\s/));
+  return lines.join(" ").split(/\s+/).filter((w) => w.length > 0).length;
+}
+
+/** Extract content of a ### subsection within a ## section's content */
+function extractSubsectionContent(sectionContent: string, subsectionName: string): string | null {
+  const pattern = new RegExp(
+    `^### +${escapeRegex(subsectionName)}\\s*$`,
+    "im",
+  );
+  const match = pattern.exec(sectionContent);
+  if (!match) return null;
+
+  const start = match.index + match[0].length;
+  const nextSub = sectionContent.slice(start).search(/^### /m);
+  const end = nextSub === -1 ? sectionContent.length : start + nextSub;
+  return sectionContent.slice(start, end);
+}
+
+function parseDescription(sections: SectionMap): SectionParseResult["description"] {
+  const content = sections["description"];
+  if (content === undefined) {
+    return { present: false, wordCount: 0 };
+  }
+  return { present: true, wordCount: countWords(content) };
+}
+
 function parseDecision(sections: SectionMap): SectionParseResult["decision"] {
   const content = sections["decision"];
   const present = content !== undefined;
+  let optionCount = 0;
+  if (present) {
+    const optionsContent = extractSubsectionContent(content, "Options Considered");
+    if (optionsContent) {
+      optionCount = countBullets(optionsContent);
+    }
+  }
   return {
     present,
+    optionCount,
     subsections: {
       context: present && hasSubsection(content, "Context"),
       optionsConsidered: present && hasSubsection(content, "Options Considered"),
@@ -120,6 +174,15 @@ function parseDecision(sections: SectionMap): SectionParseResult["decision"] {
 function parseContracts(sections: SectionMap): SectionParseResult["contracts"] {
   const content = sections["contracts"];
   const present = content !== undefined;
+  const subsectionBullets = { preconditions: 0, postconditions: 0, invariants: 0 };
+  if (present) {
+    for (const sub of ["Preconditions", "Postconditions", "Invariants"] as const) {
+      const subContent = extractSubsectionContent(content, sub);
+      if (subContent) {
+        subsectionBullets[sub.toLowerCase() as keyof typeof subsectionBullets] = countBullets(subContent);
+      }
+    }
+  }
   return {
     present,
     subsections: {
@@ -127,13 +190,14 @@ function parseContracts(sections: SectionMap): SectionParseResult["contracts"] {
       postconditions: present && hasSubsection(content, "Postconditions"),
       invariants: present && hasSubsection(content, "Invariants"),
     },
+    subsectionBullets,
   };
 }
 
 function parseThresholdRegistry(sections: SectionMap): SectionParseResult["thresholdRegistry"] {
   const content = sections["threshold registry"];
   if (content === undefined) {
-    return { present: false, rows: [] };
+    return { present: false, rows: [], hasEmptyCells: false };
   }
 
   const rows: ThresholdRow[] = [];
@@ -143,13 +207,17 @@ function parseThresholdRegistry(sections: SectionMap): SectionParseResult["thres
   const tableLines = lines.filter((l) => l.trim().startsWith("|"));
 
   // Skip header (index 0) and separator (index 1), parse data rows
+  let hasEmptyCell = false;
   for (let i = 2; i < tableLines.length; i++) {
-    const cells = tableLines[i]
-      .split("|")
-      .map((c) => c.trim())
-      .filter((c) => c !== "");
+    // Split on | but keep empty cells — trim the leading/trailing empty strings from | borders
+    const rawCells = tableLines[i].split("|").map((c) => c.trim());
+    // Remove first and last entries (empty strings from leading/trailing |)
+    const cells = rawCells.slice(1, -1);
 
     if (cells.length >= 6) {
+      if (cells.slice(0, 6).some((c) => !c || /^[-—\s]*$/.test(c))) {
+        hasEmptyCell = true;
+      }
       rows.push({
         name: cells[0],
         value: cells[1],
@@ -161,7 +229,7 @@ function parseThresholdRegistry(sections: SectionMap): SectionParseResult["thres
     }
   }
 
-  return { present: true, rows };
+  return { present: true, rows, hasEmptyCells: hasEmptyCell };
 }
 
 function parseBehavioralSpec(sections: SectionMap): SectionParseResult["behavioralSpec"] {

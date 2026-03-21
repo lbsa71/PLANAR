@@ -65,6 +65,7 @@ Options:
   --interval <seconds>           Git watch poll interval (default: 30)
   --branch <name>                Git watch branch to track
   --regress                      (integrity) Regress DONE cards with issues to PLAN/REVIEW
+  --gate-mode <mode>             Gate enforcement: "blocking" (default) or "advisory"
   --no-scan-src                  (integrity) Skip unowned source file detection
   --src-dir <dir>                (integrity) Source directory to scan (default: src)
   --help                         Show this help message`);
@@ -161,12 +162,14 @@ async function main(): Promise<void> {
         printUsage();
         process.exit(1);
       }
-      console.log(`Running card loop on: ${target}`);
+      const gateMode = options["gate-mode"] === "advisory" ? "advisory" as const : "blocking" as const;
+      console.log(`Running card loop on: ${target} (gate-mode: ${gateMode})`);
       const results = await runCardLoop(target, {
         maxIterations,
         rootPlanFile: rootFile,
         planDir,
         maxCostDollars: maxCost,
+        gateMode,
       });
       console.log(`\nCompleted ${results.length} iteration(s).`);
       const lastChanged = results.filter((r) => r.changed).length;

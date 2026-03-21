@@ -222,4 +222,82 @@ describe("parseCardSections", () => {
       expect(result.decision.present).toBe(true);
     });
   });
+
+  // ── Depth metrics ─────────────────────────────────────────
+
+  describe("depth metrics", () => {
+    it("counts Description word count", () => {
+      const result = parseCardSections(card(
+        "## Description\n\nThis is a description with several words in it."
+      ));
+      expect(result.description.present).toBe(true);
+      expect(result.description.wordCount).toBeGreaterThanOrEqual(8);
+    });
+
+    it("returns present=false and wordCount=0 when Description missing", () => {
+      const result = parseCardSections(card("## Acceptance Criteria\n- foo"));
+      expect(result.description.present).toBe(false);
+      expect(result.description.wordCount).toBe(0);
+    });
+
+    it("counts Decision optionCount from ### Options Considered bullets", () => {
+      const result = parseCardSections(card(
+        "## Decision\n\n### Context\nfoo\n\n### Options Considered\n- Option A\n- Option B\n- Option C\n\n### Choice\nA"
+      ));
+      expect(result.decision.optionCount).toBe(3);
+    });
+
+    it("returns optionCount=0 when Options Considered has no bullets", () => {
+      const result = parseCardSections(card(
+        "## Decision\n\n### Options Considered\n\n### Choice\nA"
+      ));
+      expect(result.decision.optionCount).toBe(0);
+    });
+
+    it("returns optionCount=0 when Decision is absent", () => {
+      const result = parseCardSections(card("## Description\nfoo"));
+      expect(result.decision.optionCount).toBe(0);
+    });
+
+    it("counts Contracts subsection bullets", () => {
+      const result = parseCardSections(card(
+        "## Contracts\n\n### Preconditions\n- P1\n- P2\n\n### Postconditions\n- Q1\n\n### Invariants\n- I1\n- I2\n- I3"
+      ));
+      expect(result.contracts.subsectionBullets.preconditions).toBe(2);
+      expect(result.contracts.subsectionBullets.postconditions).toBe(1);
+      expect(result.contracts.subsectionBullets.invariants).toBe(3);
+    });
+
+    it("returns 0 bullets for missing Contracts subsections", () => {
+      const result = parseCardSections(card("## Description\nfoo"));
+      expect(result.contracts.subsectionBullets.preconditions).toBe(0);
+      expect(result.contracts.subsectionBullets.postconditions).toBe(0);
+      expect(result.contracts.subsectionBullets.invariants).toBe(0);
+    });
+
+    it("detects empty cells in Threshold Registry", () => {
+      const result = parseCardSections(card(
+        "## Threshold Registry\n\n" +
+        "| Name | Value | Unit | Valid Range | Rationale | Sensitivity |\n" +
+        "|------|-------|------|-------------|-----------|-------------|\n" +
+        "| timeout | 5000 |  | 1000-30000 | UX | high |\n"
+      ));
+      expect(result.thresholdRegistry.hasEmptyCells).toBe(true);
+    });
+
+    it("returns hasEmptyCells=false when all cells filled", () => {
+      const result = parseCardSections(card(
+        "## Threshold Registry\n\n" +
+        "| Name | Value | Unit | Valid Range | Rationale | Sensitivity |\n" +
+        "|------|-------|------|-------------|-----------|-------------|\n" +
+        "| timeout | 5000 | ms | 1000-30000 | UX | high |\n"
+      ));
+      expect(result.thresholdRegistry.hasEmptyCells).toBe(false);
+    });
+
+    it("returns hasEmptyCells=false when no rows", () => {
+      const result = parseCardSections(card("## Description\nfoo"));
+      expect(result.thresholdRegistry.hasEmptyCells).toBe(false);
+    });
+  });
 });

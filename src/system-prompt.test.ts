@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { generateSystemPrompt } from "./system-prompt.js";
+import { generateSystemPrompt, buildArtifactInventory } from "./system-prompt.js";
 import { Card } from "./types.js";
 
 function makeCard(overrides: Partial<Card> = {}): Card {
@@ -31,6 +31,7 @@ describe("generateSystemPrompt", () => {
     expect(prompt).toContain("Regress the phase");
     expect(prompt).toContain("Change the card content");
     expect(prompt).toContain("card links in YAML frontmatter must remain valid");
+    expect(prompt).toContain("re-evaluate ALL existing content");
   });
 
   it("includes card file format instructions", () => {
@@ -57,6 +58,7 @@ describe("generateSystemPrompt", () => {
     expect(prompt).toContain("Leaf lifecycle");
     expect(prompt).toContain("advance status to [ARCHITECT]");
     expect(prompt).toContain("Do NOT write to src/ or docs/");
+    expect(prompt).toContain("Artifact Anticipation");
   });
 
   it("generates ARCHITECT phase prompt for leaf", () => {
@@ -118,7 +120,7 @@ describe("generateSystemPrompt", () => {
     expect(prompt).toContain("NODE");
     expect(prompt).toContain("children: in its frontmatter");
     expect(prompt).toContain("PLAN → DONE");
-    expect(prompt).toContain("Decompose this node");
+    expect(prompt).toContain("Re-evaluate this node");
   });
 
   it("generates node prompt for DONE phase", () => {
@@ -185,5 +187,80 @@ describe("generateSystemPrompt", () => {
       "plan/root.md"
     );
     expect(prompt).toContain("INACTIONABLE");
+  });
+
+  // -- Artifact inventory --
+
+  it("includes artifact inventory when provided", () => {
+    const inventory = "## Artifact Inventory\n| Section | Status |\n| Decision | Missing |";
+    const prompt = generateSystemPrompt(
+      makeCard({ status: "ARCHITECT" }),
+      "plan/root.md",
+      undefined,
+      inventory,
+    );
+    expect(prompt).toContain("Artifact Inventory");
+    expect(prompt).toContain("Decision | Missing");
+  });
+
+  it("omits artifact inventory when not provided", () => {
+    const prompt = generateSystemPrompt(
+      makeCard({ status: "ARCHITECT" }),
+      "plan/root.md",
+    );
+    expect(prompt).not.toContain("auto-detected from current card content");
+  });
+
+  it("ARCHITECT prompt uses blocking language", () => {
+    const prompt = generateSystemPrompt(
+      makeCard({ status: "ARCHITECT" }),
+      "plan/root.md",
+    );
+    expect(prompt).toContain("block");
+  });
+});
+
+describe("buildArtifactInventory", () => {
+  it("shows Missing for absent Description", () => {
+    const card = makeCard({
+      rawContent: "---\nroot: plan/root.md\n---\n# 2.1 Test [ARCHITECT]\n\n## Acceptance Criteria\n- foo",
+    });
+    const inventory = buildArtifactInventory(card);
+    expect(inventory).toContain("Description | **Missing**");
+  });
+
+  it("shows Present with word count for Description", () => {
+    const card = makeCard({
+      rawContent: "---\nroot: plan/root.md\n---\n# 2.1 Test [ARCHITECT]\n\n## Description\nThis is a description with several words in it.",
+    });
+    const inventory = buildArtifactInventory(card);
+    expect(inventory).toContain("Description | Present (");
+    expect(inventory).toContain("words)");
+  });
+
+  it("shows Decision subsection details", () => {
+    const card = makeCard({
+      rawContent: [
+        "---", "root: plan/root.md", "---", "# 2.1 Test [ARCHITECT]",
+        "", "## Decision", "", "### Context", "foo", "", "### Options Considered",
+        "- A", "- B", "", "### Choice", "A",
+      ].join("\n"),
+    });
+    const inventory = buildArtifactInventory(card);
+    expect(inventory).toContain("Decision | Present");
+    expect(inventory).toContain("Options: yes (2)");
+    expect(inventory).toContain("Rationale: **no**");
+  });
+
+  it("shows action needed when gate would fail", () => {
+    const card = makeCard({
+      rawContent: [
+        "---", "root: plan/root.md", "---", "# 2.1 Test [ARCHITECT]",
+        "", "## Description", "Define the interface for the parser module.",
+      ].join("\n"),
+    });
+    const inventory = buildArtifactInventory(card);
+    expect(inventory).toContain("Action needed");
+    expect(inventory).toContain("Contracts");
   });
 });

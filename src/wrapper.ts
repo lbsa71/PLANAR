@@ -5,7 +5,7 @@ import { debugLog, debugLogProcessError } from "./debug-log.js";
 import { runGateForTransition } from "./gate-checks.js";
 import { dotPathToGuid } from "./guid.js";
 import { resolveClaudePath } from "./resolve-claude.js";
-import { generateSystemPrompt } from "./system-prompt.js";
+import { buildArtifactInventory, generateSystemPrompt } from "./system-prompt.js";
 import {
   ClaudeInvoker,
   FileSystem,
@@ -67,7 +67,7 @@ export async function runCardLoop(
   const rootPlanFile = config.rootPlanFile ?? "plan/root.md";
   const planDir = config.planDir ?? "plan";
   const maxCostDollars = config.maxCostDollars ?? Infinity;
-  const gateMode: GateMode = config.gateMode ?? "advisory";
+  const gateMode: GateMode = config.gateMode ?? "blocking";
   const results: IterationResult[] = [];
   let accumulatedCost = 0;
   let gateContext: string | undefined;
@@ -112,7 +112,8 @@ export async function runCardLoop(
     }
 
     const sessionId = dotPathToGuid(card.dotPath);
-    const systemPrompt = generateSystemPrompt(card, rootPlanFile, gateContext);
+    const artifactInventory = buildArtifactInventory(card);
+    const systemPrompt = generateSystemPrompt(card, rootPlanFile, gateContext, artifactInventory);
     gateContext = undefined; // Clear after consumption
 
     console.log(

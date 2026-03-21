@@ -28,6 +28,9 @@ export const THRESHOLD_KEYWORDS =
 export const FLOW_KEYWORDS =
   /flow|algorithm|sequence|state|transition|step|escalat/i;
 export const MIN_AC_BULLETS = 1;
+export const MIN_DECISION_OPTIONS = 2;
+export const MIN_SUBSECTION_BULLETS = 1;
+export const MIN_DESCRIPTION_WORDS = 10;
 
 // ── Internal Helpers ────────────────────────────────────────
 
@@ -160,6 +163,12 @@ export function checkArchitectToImplement(card: Card): GateResult {
           "## Decision section is required when Description mentions choice/pattern/library keywords",
       });
     } else {
+      if (!sections.decision.subsections.context) {
+        violations.push({
+          check: "decision-subsection-missing",
+          message: "### Context subsection is missing from ## Decision",
+        });
+      }
       if (!sections.decision.subsections.optionsConsidered) {
         violations.push({
           check: "decision-subsection-missing",
@@ -177,6 +186,12 @@ export function checkArchitectToImplement(card: Card): GateResult {
         violations.push({
           check: "decision-subsection-missing",
           message: "### Rationale subsection is missing from ## Decision",
+        });
+      }
+      if (!sections.decision.subsections.consequences) {
+        violations.push({
+          check: "decision-subsection-missing",
+          message: "### Consequences subsection is missing from ## Decision",
         });
       }
     }
@@ -205,6 +220,47 @@ export function checkArchitectToImplement(card: Card): GateResult {
           "Behavioral spec (inline Given/When/Then or linked .feature) is required when Description mentions flow/algorithm/sequence keywords",
       });
     }
+  }
+
+  // ── Depth checks (catch hollow sections) ──────────────────
+
+  // 8. Description depth
+  if (sections.description.present && sections.description.wordCount < MIN_DESCRIPTION_WORDS) {
+    violations.push({
+      check: "description-depth",
+      message: `## Description must have at least ${MIN_DESCRIPTION_WORDS} words (has ${sections.description.wordCount})`,
+    });
+  }
+
+  // 9. Decision option count
+  if (sections.decision.present && sections.decision.optionCount < MIN_DECISION_OPTIONS) {
+    violations.push({
+      check: "decision-option-count",
+      message: `### Options Considered must list at least ${MIN_DECISION_OPTIONS} options (has ${sections.decision.optionCount})`,
+    });
+  }
+
+  // 10. Contracts subsection depth
+  if (sections.contracts.present) {
+    for (const sub of ["preconditions", "postconditions", "invariants"] as const) {
+      if (
+        sections.contracts.subsections[sub] &&
+        sections.contracts.subsectionBullets[sub] < MIN_SUBSECTION_BULLETS
+      ) {
+        violations.push({
+          check: "contracts-subsection-depth",
+          message: `### ${sub.charAt(0).toUpperCase() + sub.slice(1)} must have at least ${MIN_SUBSECTION_BULLETS} bullet(s) (has ${sections.contracts.subsectionBullets[sub]})`,
+        });
+      }
+    }
+  }
+
+  // 11. Threshold Registry empty cells
+  if (sections.thresholdRegistry.present && sections.thresholdRegistry.hasEmptyCells) {
+    violations.push({
+      check: "threshold-empty-cells",
+      message: "## Threshold Registry has rows with empty cells — all columns must be filled",
+    });
   }
 
   return makeResult(violations);

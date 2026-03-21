@@ -86,7 +86,7 @@ export interface WrapperConfig {
   planDir: string;
   /** Max cost in dollars before stopping (budget exhausted termination) */
   maxCostDollars: number;
-  /** Gate enforcement mode: "advisory" (default) logs warnings, "blocking" reverts transitions */
+  /** Gate enforcement mode: "blocking" (default) reverts transitions, "advisory" logs warnings */
   gateMode: GateMode;
 }
 

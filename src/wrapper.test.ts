@@ -160,6 +160,7 @@ describe("runCardLoop", () => {
       planDir: "plan",
       rootPlanFile: "plan/root.md",
       maxIterations: 5,
+      gateMode: "advisory",
     }, deps);
 
     expect(results).toHaveLength(1);
@@ -194,6 +195,7 @@ describe("runCardLoop", () => {
       planDir: "plan",
       rootPlanFile: "plan/root.md",
       maxIterations: 5,
+      gateMode: "advisory",
     }, deps);
 
     expect(results.length).toBeGreaterThanOrEqual(1);
@@ -223,6 +225,7 @@ describe("runCardLoop", () => {
       planDir: "plan",
       rootPlanFile: "plan/root.md",
       maxIterations: 3,
+      gateMode: "advisory",
     }, deps);
 
     expect(results).toHaveLength(3);
@@ -252,6 +255,7 @@ describe("runCardLoop", () => {
       rootPlanFile: "plan/root.md",
       maxIterations: 100,
       maxCostDollars: 1.0,
+      gateMode: "advisory",
     }, deps);
 
     // Should stop after 2 iterations ($0.50 * 2 = $1.00)
