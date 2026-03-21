@@ -3,8 +3,9 @@ import { isPhase } from "./card.js";
 
 /**
  * Generate the system prompt for a given card based on its current phase.
+ * @param gateContext - Optional gate violation context from the previous iteration.
  */
-export function generateSystemPrompt(card: Card, rootPlanFile: string): string {
+export function generateSystemPrompt(card: Card, rootPlanFile: string, gateContext?: string): string {
   const phase = isPhase(card.status) ? card.status : null;
   const isNode = card.isNode;
 
@@ -55,6 +56,10 @@ blocked-by:            # only if this card depends on others
 \`\`\`
 Card links (parent, root, children, blocked-by) go in YAML frontmatter. The heading contains the dot-path, title, and status in brackets.${manifestInstructions}`;
 
+  const gateSection = gateContext
+    ? `\n\n## Gate Violations from Previous Iteration\n${gateContext}`
+    : "";
+
   if (isNode) {
     return `${preamble}
 
@@ -64,7 +69,7 @@ Node lifecycle: PLAN → DONE
 A node is DONE when it has the right children with the right boundaries, regardless of children's status.
 
 ## Your Task
-${getNodeTaskPrompt(phase)}`;
+${getNodeTaskPrompt(phase)}${gateSection}`;
   }
 
   return `${preamble}
@@ -74,7 +79,7 @@ This card is a LEAF (no children: in frontmatter). Leaves go through the full ph
 Leaf lifecycle: PLAN → ARCHITECT → IMPLEMENT → REVIEW → DONE
 
 ## Current Phase: [${phase ?? formatSpecialStatus(card.status)}]
-${getLeafPhasePrompt(phase)}`;
+${getLeafPhasePrompt(phase)}${gateSection}`;
 }
 
 function getNodeTaskPrompt(phase: string | null): string {
@@ -108,21 +113,55 @@ Decompose this leaf into actionable work. You may:
 When planning is complete, advance status to [ARCHITECT].
 If this card needs children, use Hierarchize — it will become a node.
 
+### Exit Criteria (gate to ARCHITECT)
+1. Description is present and non-empty
+2. At least one Acceptance Criterion exists
+3. Each Acceptance Criterion is testable (contains a verifiable predicate, not vague language)
+4. If the card is too large for one implementation pass, it has been split
+5. \`blocked-by\` dependencies (if any) reference valid card paths
+
 ### Isolation
-During [PLAN], you may only read source files and write plan cards. Do NOT write to src/ or docs/.`;
+During [PLAN], you may read \`plan/**\`, \`src/**\`, \`docs/**\`. You may write \`plan/<own-card>.md\` and \`plan/<new-child-cards>.md\`. Do NOT write to src/ or docs/.`;
 
     case "ARCHITECT":
       return `## ARCHITECT Phase
-Design the solution. You should:
-1. Define interfaces and contracts
-2. Update or create ARCHITECTURE.md in the relevant docs/ subdirectory for your domain
-3. Populate the file manifest with all files you'll need to touch
-4. Ensure acceptance criteria are testable
+Capture every design decision and contract so IMPLEMENT is purely mechanical.
+
+### Artifact Sections to Author
+Determine which sections are needed using the "When Required" rules, then write each using the content template from artifact-taxonomy-ARCHITECTURE.md:
+1. **Decision** — if card selects a design pattern, library, data structure, algorithm, or technology from among alternatives. Must include: Context, Options Considered (≥2), Choice, Rationale, Consequences.
+2. **Contracts** — if card defines or modifies an interface, API surface, or exported type. Must include: Preconditions, Postconditions, Invariants.
+3. **Threshold Registry** — if card introduces numeric constants affecting system behavior. Must include table with: Name, Value, Unit, Valid Range, Rationale, Sensitivity.
+4. **Behavioral Spec** — if card specifies algorithmic flows, state machines, or multi-step processes. Use inline Given/When/Then in AC for ≤3 scenarios; linked \`.feature\` file for more.
+
+### Section Ordering
+Decision → Contracts → Threshold Registry → File Manifest → Acceptance Criteria (with inline Behavioral Spec if applicable).
+
+### Workflow
+1. Read Description and Acceptance Criteria
+2. Determine which artifact sections are needed
+3. Write each required section using the content template
+4. Populate the File Manifest with all files to be created or modified during IMPLEMENT
+5. Update or create ARCHITECTURE.md in the relevant docs/ subdirectory for your domain
+
+### Exit Criteria (gate to IMPLEMENT)
+1. **Decision completeness**: For every design choice implied by Description, a Decision section exists
+2. **Contract completeness**: For every interface/API surface defined or modified, a Contracts section exists
+3. **Threshold completeness**: For every numeric constant introduced, a Threshold Registry row exists
+4. **Behavioral completeness**: For every multi-step flow or state transition, Behavioral Spec scenarios exist
+5. **File Manifest** has ≥1 entry listing every file to create or modify
+6. **Mechanical IMPLEMENT test** (self-check): Could a different agent, given only this card's Description + artifact sections + File Manifest, produce functionally identical code without asking questions?
+
+### Structural Validation (automated gate)
+- If Description contains interface/API/type keywords → Contracts section must exist
+- If Description contains choice/pattern/library/framework keywords → Decision section must exist
+- If Description contains threshold/timeout/constant/default keywords → Threshold Registry must exist
+- If Description contains flow/algorithm/sequence/state keywords → Behavioral Spec must exist
 
 When architecture is complete, advance status to [IMPLEMENT].
 
 ### Isolation
-During [ARCHITECT], you may write to docs/ within your domain and edit your card. Do NOT write to src/.`;
+During [ARCHITECT], you may read \`plan/**\`, \`src/**\`, \`docs/**\`. You may write \`docs/<own-domain>/**\` and \`plan/<own-card>.md\`. Do NOT write to src/.`;
 
     case "IMPLEMENT":
       return `## IMPLEMENT Phase
@@ -134,26 +173,74 @@ Implementation discipline:
 If the card is too large for one implementation pass, regress to [PLAN] and split.
 When implementation is complete and tests pass, advance status to [REVIEW].
 
+### The Mechanical IMPLEMENT Criterion
+This phase is **purely mechanical**. You must NOT:
+- Choose between design alternatives (→ regress to ARCHITECT, add Decision)
+- Invent interface shapes (→ regress to ARCHITECT, add Contracts)
+- Pick numeric constants (→ regress to ARCHITECT, add Threshold Registry)
+- Decide behavior for unspecified edge cases (→ regress to ARCHITECT, add Behavioral Spec)
+
+If you encounter ANY of these situations, you MUST regress the card to [ARCHITECT] and update the card content to explain what was underspecified. This is a **mandatory regression** — you cannot proceed by guessing.
+
+### Implementation Workflow
+1. Read all artifact sections from the card (Decision, Contracts, Threshold Registry, Behavioral Spec)
+2. Read the File Manifest to identify target files
+3. For each file: translate Contracts → type definitions + guards, Decision → pattern selection, Threshold Registry → constant definitions, Behavioral Spec → test cases
+4. Run Red/Green/Refactor: failing test → minimal passing code → cleanup
+5. Verify all exit criteria
+
+### Exit Criteria (gate to REVIEW)
+1. Every file in the File Manifest has been created or modified
+2. Every Contracts precondition has a corresponding guard in the implementation
+3. Every Contracts postcondition has a corresponding test assertion
+4. Every Contracts invariant holds across all test cases
+5. Every Decision's chosen option is reflected in the implementation
+6. Every Threshold Registry constant appears in code with the specified value and name
+7. Every Behavioral Spec scenario has a corresponding test that passes
+8. No unregistered magic numbers exist in the implementation
+9. All tests pass
+
 ### Isolation
-During [IMPLEMENT], you may write to src/ within your domain and edit your card. Do NOT write to docs/ or other plan cards.`;
+During [IMPLEMENT], you may read \`plan/<own-card>.md\`, \`src/**\`, \`docs/<own-domain>/**\`. You may write \`src/<own-domain>/**\` and \`plan/<own-card>.md\`. Do NOT write to docs/ or other plan cards.`;
 
     case "REVIEW":
       return `## REVIEW Phase
-Verify the implementation:
-1. Check each acceptance criterion
-2. Verify tests exist and pass
-3. Check for regressions in sibling domains
-4. Verify file manifest is up to date
+Verify implementation **against artifacts**, not against intuition.
+
+### Verification Method
+Check artifacts against implementation — ask:
+- "Does the code match the Contracts?" — not "Is this good code?"
+- "Does the code follow the Decision?" — not "Would I have chosen differently?"
+- "Do the constants match the Threshold Registry?" — not "Are these good values?"
+
+If you find a deficiency, identify which artifact it violates. If no artifact is violated but you believe the approach is wrong, regress to ARCHITECT and add/modify the relevant artifact — do NOT edit code directly.
+
+### Exit Criteria (gate to DONE)
+1. Every acceptance criterion is verified as met
+2. Every Contracts item is verified against implementation (precondition guards exist, postcondition tests pass, invariants hold)
+3. Every Decision's chosen option is used in implementation (no drift)
+4. Every Threshold Registry value matches the code constant
+5. Every Behavioral Spec scenario has a passing test
+6. File Manifest is accurate (no missing files, no extra unlisted files modified)
+7. No regressions in sibling domain tests
+8. Tests pass in clean run
+
+### Mandatory Regressions
+- Missing test coverage for a spec scenario → regress to IMPLEMENT
+- Artifact violation found → regress to IMPLEMENT (code fix) or ARCHITECT (artifact fix)
+
+### Optional Regressions
+- Better approach found → regress to ARCHITECT with content changes
+- Code quality issues (not correctness) → regress to IMPLEMENT
 
 If all criteria are met, advance to [DONE].
-If issues are found, regress to the appropriate phase with content changes explaining why.
 
 ### Isolation
-During [REVIEW], you may only read source files and edit your card. Do NOT write to src/ or docs/.`;
+During [REVIEW], you may read \`plan/<own-card>.md\`, \`src/**\`, \`docs/<own-domain>/**\`. You may write \`plan/<own-card>.md\` (status + regression notes only). Do NOT write to src/ or docs/.`;
 
     case "DONE":
       return `## DONE Phase
-This card is complete. Review it one more time.
+This card is complete and frozen. Review it one more time.
 If everything still looks correct, make no changes (this signals convergence).
 If something needs to be revisited, Challenge it back to an earlier phase — remember, you MUST change card content when regressing.`;
 

@@ -1,14 +1,17 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
-import { parseCard, discoverCards, checkReferenceIntegrity } from "./card.js";
+import { parseCard, discoverCards, checkReferenceIntegrity, isPhase } from "./card.js";
 import { debugLog, debugLogProcessError } from "./debug-log.js";
+import { runGateForTransition } from "./gate-checks.js";
 import { dotPathToGuid } from "./guid.js";
 import { resolveClaudePath } from "./resolve-claude.js";
 import { generateSystemPrompt } from "./system-prompt.js";
 import {
   ClaudeInvoker,
   FileSystem,
+  GateMode,
   IterationResult,
+  LeafPhase,
   WrapperConfig,
 } from "./types.js";
 
@@ -64,8 +67,10 @@ export async function runCardLoop(
   const rootPlanFile = config.rootPlanFile ?? "plan/root.md";
   const planDir = config.planDir ?? "plan";
   const maxCostDollars = config.maxCostDollars ?? Infinity;
+  const gateMode: GateMode = config.gateMode ?? "advisory";
   const results: IterationResult[] = [];
   let accumulatedCost = 0;
+  let gateContext: string | undefined;
 
   for (let i = 0; i < maxIterations; i++) {
     // Termination: all cards DONE
@@ -107,7 +112,8 @@ export async function runCardLoop(
     }
 
     const sessionId = dotPathToGuid(card.dotPath);
-    const systemPrompt = generateSystemPrompt(card, rootPlanFile);
+    const systemPrompt = generateSystemPrompt(card, rootPlanFile, gateContext);
+    gateContext = undefined; // Clear after consumption
 
     console.log(
       `[${card.dotPath}] Iteration ${i + 1}/${maxIterations} — phase: [${card.status}]`
@@ -166,7 +172,7 @@ export async function runCardLoop(
       break;
     }
 
-    const afterContent = deps.fs.readFileSync(cardFile, "utf-8");
+    let afterContent = deps.fs.readFileSync(cardFile, "utf-8");
     const changed = beforeContent !== afterContent;
 
     results.push({
@@ -185,6 +191,45 @@ export async function runCardLoop(
     }
 
     const postCard = parseCard(cardFile, afterContent);
+
+    // Gate checking: only when a phase transition is detected
+    const beforePhase = card.status;
+    const afterPhase = postCard.status;
+    if (
+      isPhase(beforePhase) &&
+      isPhase(afterPhase) &&
+      beforePhase !== afterPhase
+    ) {
+      const gateResult = runGateForTransition(
+        beforePhase as LeafPhase,
+        afterPhase as LeafPhase,
+        postCard,
+        (p: string) => deps.fs.existsSync(p),
+      );
+
+      if (!gateResult.pass) {
+        const violationMessages = gateResult.violations
+          .map((v) => `- [${v.check}] ${v.message}`)
+          .join("\n");
+
+        if (gateMode === "blocking") {
+          // Revert the transition
+          deps.fs.writeFileSync(cardFile, beforeContent);
+          afterContent = beforeContent;
+          console.error(
+            `[${card.dotPath}] Gate BLOCKED transition ${beforePhase}→${afterPhase}:\n${violationMessages}`
+          );
+        } else {
+          // Advisory: log warnings but allow the transition
+          console.warn(
+            `[${card.dotPath}] Gate advisory warnings for ${beforePhase}→${afterPhase}:\n${violationMessages}`
+          );
+        }
+
+        gateContext = `Transition ${beforePhase}→${afterPhase} had gate violations:\n${violationMessages}`;
+      }
+    }
+
     const postAllCards = discoverCards(planDir, deps.fs);
     const postErrors = checkReferenceIntegrity(postCard, postAllCards);
     if (postErrors.length > 0) {

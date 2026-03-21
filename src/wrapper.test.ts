@@ -1,6 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import { runCardLoop, parseClaudeOutput, WrapperDeps } from "./wrapper.js";
-import { ClaudeInvoker, FileSystem } from "./types.js";
+import { ClaudeInvoker, FileSystem, GateMode } from "./types.js";
+import { generateSystemPrompt } from "./system-prompt.js";
+import { parseCard } from "./card.js";
+import { runGateForTransition } from "./gate-checks.js";
 
 /** Normalize path separators to forward slashes for cross-platform testing */
 function norm(p: string): string {
@@ -360,5 +363,274 @@ describe("parseClaudeOutput", () => {
   it("handles non-JSON output gracefully", () => {
     const result = parseClaudeOutput("Some plain text output");
     expect(result.rateLimited).toBe(false);
+  });
+});
+
+// ── Gate enforcement tests ──────────────────────────────────
+
+const CARD_PLAN_FULL = `---
+root: plan/root.md
+---
+# 2.1 Plan Parser [PLAN]
+
+## Description
+Parse plan files.
+
+## Acceptance Criteria
+- Parses YAML frontmatter correctly
+`;
+
+const CARD_ARCHITECT_FULL = `---
+root: plan/root.md
+---
+# 2.1 Plan Parser [ARCHITECT]
+
+## Description
+Parse plan files.
+
+## Acceptance Criteria
+- Parses YAML frontmatter correctly
+`;
+
+const CARD_PLAN_NO_DESC = `---
+root: plan/root.md
+---
+# 2.1 Plan Parser [PLAN]
+
+## Acceptance Criteria
+- Something
+`;
+
+const CARD_ARCHITECT_NO_DESC = `---
+root: plan/root.md
+---
+# 2.1 Plan Parser [ARCHITECT]
+
+## Acceptance Criteria
+- Something
+`;
+
+describe("runGateForTransition", () => {
+  it("returns pass for unknown transitions (Scenario 5)", () => {
+    const card = parseCard("plan/2.1-parser.md", CARD_PLAN_FULL);
+    const result = runGateForTransition("PLAN", "DONE", card, () => true);
+    expect(result.pass).toBe(true);
+    expect(result.violations).toHaveLength(0);
+  });
+
+  it("passes PLAN→ARCHITECT with valid Description and AC (Scenario 1)", () => {
+    const card = parseCard("plan/2.1-parser.md", CARD_ARCHITECT_FULL);
+    const result = runGateForTransition("PLAN", "ARCHITECT", card, () => true);
+    expect(result.pass).toBe(true);
+    expect(result.violations).toHaveLength(0);
+  });
+
+  it("fails PLAN→ARCHITECT without Description (Scenario 2)", () => {
+    const card = parseCard("plan/2.1-parser.md", CARD_ARCHITECT_NO_DESC);
+    const result = runGateForTransition("PLAN", "ARCHITECT", card, () => true);
+    expect(result.pass).toBe(false);
+    expect(result.violations.length).toBeGreaterThan(0);
+    expect(result.violations.some((v) => v.check === "description-exists")).toBe(true);
+  });
+});
+
+describe("gate enforcement in wrapper", () => {
+  it("advisory mode — gate passes, no warnings (Scenario 1)", async () => {
+    const files: Record<string, string> = {
+      "plan/root.md": ROOT_CARD,
+      "plan/2-core.md": PARENT_CARD,
+      "plan/2.1-parser.md": CARD_PLAN_FULL,
+    };
+
+    let callCount = 0;
+    const claude: ClaudeInvoker = {
+      invoke() {
+        callCount++;
+        if (callCount === 1) {
+          // Simulate advancing to ARCHITECT (with Description & AC present)
+          files["plan/2.1-parser.md"] = CARD_ARCHITECT_FULL;
+          return JSON.stringify({ result: "ok" });
+        }
+        // Second iteration: card is ARCHITECT, make it DONE to stop
+        files["plan/2.1-parser.md"] = CARD_DONE;
+        return null;
+      },
+    };
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const deps: WrapperDeps = { fs: mockFs(files), claude };
+    const results = await runCardLoop("plan/2.1-parser.md", {
+      planDir: "plan",
+      rootPlanFile: "plan/root.md",
+      maxIterations: 5,
+      gateMode: "advisory",
+    }, deps);
+
+    // Gate passed — no gate-related warnings
+    const gateWarns = warnSpy.mock.calls.filter(
+      (args) => typeof args[0] === "string" && args[0].includes("Gate advisory")
+    );
+    expect(gateWarns).toHaveLength(0);
+
+    warnSpy.mockRestore();
+    errorSpy.mockRestore();
+    logSpy.mockRestore();
+  });
+
+  it("advisory mode — gate fails, transition kept, warnings logged (Scenario 2)", async () => {
+    const files: Record<string, string> = {
+      "plan/root.md": ROOT_CARD,
+      "plan/2-core.md": PARENT_CARD,
+      "plan/2.1-parser.md": CARD_PLAN_NO_DESC,
+    };
+
+    let callCount = 0;
+    const claude: ClaudeInvoker = {
+      invoke() {
+        callCount++;
+        if (callCount === 1) {
+          // Simulate advancing to ARCHITECT (but no Description)
+          files["plan/2.1-parser.md"] = CARD_ARCHITECT_NO_DESC;
+          return JSON.stringify({ result: "ok" });
+        }
+        // Stop the loop
+        files["plan/2.1-parser.md"] = CARD_DONE;
+        return null;
+      },
+    };
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const deps: WrapperDeps = { fs: mockFs(files), claude };
+    const results = await runCardLoop("plan/2.1-parser.md", {
+      planDir: "plan",
+      rootPlanFile: "plan/root.md",
+      maxIterations: 5,
+      gateMode: "advisory",
+    }, deps);
+
+    // Transition was kept (not reverted)
+    expect(results[0].changed).toBe(true);
+    expect(results[0].afterContent).toBe(CARD_ARCHITECT_NO_DESC);
+
+    // Warnings were logged
+    const gateWarns = warnSpy.mock.calls.filter(
+      (args) => typeof args[0] === "string" && args[0].includes("Gate advisory")
+    );
+    expect(gateWarns.length).toBeGreaterThan(0);
+
+    warnSpy.mockRestore();
+    errorSpy.mockRestore();
+    logSpy.mockRestore();
+  });
+
+  it("blocking mode — gate fails, transition reverted (Scenario 3)", async () => {
+    const files: Record<string, string> = {
+      "plan/root.md": ROOT_CARD,
+      "plan/2-core.md": PARENT_CARD,
+      "plan/2.1-parser.md": CARD_PLAN_NO_DESC,
+    };
+
+    let callCount = 0;
+    const claude: ClaudeInvoker = {
+      invoke() {
+        callCount++;
+        if (callCount === 1) {
+          // Simulate advancing to ARCHITECT (but no Description)
+          files["plan/2.1-parser.md"] = CARD_ARCHITECT_NO_DESC;
+          return JSON.stringify({ result: "ok" });
+        }
+        // Second call: no change (convergence)
+        return null;
+      },
+    };
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const deps: WrapperDeps = { fs: mockFs(files), claude };
+    const results = await runCardLoop("plan/2.1-parser.md", {
+      planDir: "plan",
+      rootPlanFile: "plan/root.md",
+      maxIterations: 5,
+      gateMode: "blocking",
+    }, deps);
+
+    // Errors were logged (blocking mode)
+    const gateErrors = errorSpy.mock.calls.filter(
+      (args) => typeof args[0] === "string" && args[0].includes("Gate BLOCKED")
+    );
+    expect(gateErrors.length).toBeGreaterThan(0);
+
+    // Card file should have been reverted to original content
+    expect(files["plan/2.1-parser.md"]).toBe(CARD_PLAN_NO_DESC);
+
+    warnSpy.mockRestore();
+    errorSpy.mockRestore();
+    logSpy.mockRestore();
+  });
+
+  it("no transition — no gate check runs (Scenario 4)", async () => {
+    const files: Record<string, string> = {
+      "plan/root.md": ROOT_CARD,
+      "plan/2-core.md": PARENT_CARD,
+      "plan/2.1-parser.md": CARD_PLAN_NO_DESC,
+    };
+
+    let callCount = 0;
+    const claude: ClaudeInvoker = {
+      invoke() {
+        callCount++;
+        // Modify card but don't change status
+        files["plan/2.1-parser.md"] = CARD_PLAN_NO_DESC + "\n<!-- touched -->\n";
+        return null;
+      },
+    };
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const deps: WrapperDeps = { fs: mockFs(files), claude };
+    await runCardLoop("plan/2.1-parser.md", {
+      planDir: "plan",
+      rootPlanFile: "plan/root.md",
+      maxIterations: 2,
+      gateMode: "blocking",
+    }, deps);
+
+    // No gate-related warnings or errors
+    const gateMessages = [
+      ...warnSpy.mock.calls,
+      ...errorSpy.mock.calls,
+    ].filter(
+      (args) => typeof args[0] === "string" && args[0].includes("Gate")
+    );
+    expect(gateMessages).toHaveLength(0);
+
+    warnSpy.mockRestore();
+    errorSpy.mockRestore();
+    logSpy.mockRestore();
+  });
+});
+
+describe("generateSystemPrompt gate context (Scenario 6)", () => {
+  it("includes gate violation section when gateContext is provided", () => {
+    const card = parseCard("plan/2.1-parser.md", CARD_PLAN_FULL);
+    const prompt = generateSystemPrompt(card, "plan/root.md", "- [description-exists] ## Description section is missing");
+    expect(prompt).toContain("## Gate Violations from Previous Iteration");
+    expect(prompt).toContain("description-exists");
+  });
+
+  it("does not include gate violation section when gateContext is undefined", () => {
+    const card = parseCard("plan/2.1-parser.md", CARD_PLAN_FULL);
+    const prompt = generateSystemPrompt(card, "plan/root.md");
+    expect(prompt).not.toContain("Gate Violations");
   });
 });

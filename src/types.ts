@@ -76,6 +76,9 @@ export interface IterationResult {
   iterationNumber: number;
 }
 
+/** Gate enforcement mode */
+export type GateMode = "advisory" | "blocking";
+
 /** Wrapper configuration */
 export interface WrapperConfig {
   maxIterations: number;
@@ -83,6 +86,8 @@ export interface WrapperConfig {
   planDir: string;
   /** Max cost in dollars before stopping (budget exhausted termination) */
   maxCostDollars: number;
+  /** Gate enforcement mode: "advisory" (default) logs warnings, "blocking" reverts transitions */
+  gateMode: GateMode;
 }
 
 /** Orchestrator configuration */

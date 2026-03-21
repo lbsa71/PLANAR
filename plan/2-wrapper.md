@@ -5,6 +5,7 @@ children:
   - plan/2.1-ralph-wiggum-loop.md
   - plan/2.2-system-prompt.md
   - plan/2.3-termination.md
+  - plan/2.4-gate-enforcement.md
 last-integrity-check: 2026-03-18T19:45:36.629Z
 ---
 # 2 Wrapper [DONE]
@@ -23,6 +24,7 @@ See @README.md — "The Ralph Wiggum Pattern" section.
 - Rate limit (429) handling with retry
 - Link integrity checked before and after each iteration
 - Fresh context each invocation (no accumulated bias)
+- Structural gate checks run on phase transitions (advisory or blocking mode)
 
 ## Revision History
 - 2026-03-18T19:45:36.629Z: integrity-check passed
