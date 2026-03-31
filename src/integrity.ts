@@ -298,6 +298,95 @@ export function applyIntegrityResults(
 }
 
 /**
+ * Smoke-test a node's entire descendant tree when the node is in PLAN.
+ *
+ * Recursively walks all descendants via children refs and checks:
+ *   - File manifest entries exist on disk
+ *   - Node children marked DONE actually have all their children DONE
+ *
+ * Returns a list of cards that were regressed, with their new phase.
+ * Cards past PLAN with missing manifest files → regress to PLAN.
+ * DONE nodes with non-DONE children → regress to PLAN.
+ */
+export function smokeTestDescendants(
+  rootCard: Card,
+  allCards: Card[],
+  cwd: string,
+  injectedFs: FileSystem
+): string[] {
+  const regressed: string[] = [];
+  const descendants = collectDescendants(rootCard, allCards);
+
+  for (const card of descendants) {
+    // Only check cards that have progressed past PLAN
+    if (!isPhase(card.status) || card.status === "PLAN") continue;
+
+    const issues: string[] = [];
+
+    // Check file manifest entries exist on disk
+    for (const manifestFile of card.fileManifest) {
+      const absPath = path.resolve(cwd, manifestFile);
+      if (!injectedFs.existsSync(absPath)) {
+        issues.push(`manifest file '${manifestFile}' missing from disk`);
+      }
+    }
+
+    // Check DONE nodes have all children DONE
+    if (card.isNode && card.status === "DONE") {
+      const children = card.refs.children
+        .map((ref) => allCards.find((c) => normPath(c.filePath).endsWith(normPath(ref))))
+        .filter((c): c is Card => c !== undefined);
+      const nonDone = children.filter((c) => c.status !== "DONE");
+      if (nonDone.length > 0) {
+        issues.push(
+          `node marked DONE but ${nonDone.length} child(ren) not DONE: ${nonDone.map((c) => c.dotPath).join(", ")}`
+        );
+      }
+    }
+
+    if (issues.length === 0) continue;
+
+    // Regress this card to PLAN
+    const ts = new Date().toISOString();
+    let content = card.rawContent;
+    content = updateCardStatus(content, "PLAN");
+    content = appendRevisionEntry(
+      content,
+      `${ts}: regressed to PLAN by smoke-test — ${issues.join("; ")}`
+    );
+    injectedFs.writeFileSync(card.filePath, content);
+    regressed.push(`${card.dotPath} → PLAN (${issues.join("; ")})`);
+  }
+
+  return regressed;
+}
+
+/**
+ * Collect all descendant cards of a given card, recursively following children refs.
+ */
+function collectDescendants(rootCard: Card, allCards: Card[]): Card[] {
+  const result: Card[] = [];
+  const queue: Card[] = [rootCard];
+  const seen = new Set<string>();
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    for (const childRef of current.refs.children) {
+      const child = allCards.find((c) =>
+        normPath(c.filePath).endsWith(normPath(childRef))
+      );
+      if (child && !seen.has(child.dotPath)) {
+        seen.add(child.dotPath);
+        result.push(child);
+        queue.push(child);
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
  * Format an IntegrityReport for human-readable CLI output.
  */
 export function formatIntegrityReport(report: IntegrityReport): string {

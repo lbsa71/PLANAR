@@ -12,7 +12,7 @@ import {
   stripFrontmatter,
   appendRevisionEntry,
 } from "./card.js";
-import { checkTreeIntegrity, applyIntegrityResults, formatIntegrityReport } from "./integrity.js";
+import { checkTreeIntegrity, applyIntegrityResults, formatIntegrityReport, smokeTestDescendants } from "./integrity.js";
 import { debugLog, debugLogProcessError } from "./debug-log.js";
 import { resolveClaudePath } from "./resolve-claude.js";
 import { generateSystemPrompt } from "./system-prompt.js";
@@ -304,6 +304,22 @@ export class Orchestrator {
    * Uses --output-format stream-json to get real-time events.
    */
   private spawnAgent(card: Card): void {
+    // Smoke test: when a node enters PLAN, recursively check all descendants
+    // and regress any whose artifacts are invalid back to PLAN
+    if (card.isNode && card.status === "PLAN") {
+      const allCards = discoverCards(this.config.planDir, this.deps.fs);
+      const regressed = smokeTestDescendants(card, allCards, process.cwd(), this.deps.fs);
+      if (regressed.length > 0) {
+        this.dashboard.log(
+          card.dotPath,
+          `Smoke test regressed ${regressed.length} descendant(s)`
+        );
+        for (const entry of regressed) {
+          this.dashboard.log(card.dotPath, `  ${entry}`);
+        }
+      }
+    }
+
     const slot: AgentSlot = {
       dotPath: card.dotPath,
       cardFile: card.filePath,

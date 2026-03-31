@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import { parseCard, discoverCards, checkReferenceIntegrity, isPhase } from "./card.js";
+import { smokeTestDescendants } from "./integrity.js";
 import { debugLog, debugLogProcessError } from "./debug-log.js";
 import { runGateForTransition } from "./gate-checks.js";
 import { dotPathToGuid } from "./guid.js";
@@ -109,6 +110,17 @@ export async function runCardLoop(
         `[${card.dotPath}] Link integrity errors:\n  ${refErrors.join("\n  ")}`
       );
       break;
+    }
+
+    // Smoke test: when a node enters PLAN, recursively check all descendants
+    // and regress any whose artifacts are invalid back to PLAN
+    if (card.isNode && card.status === "PLAN") {
+      const regressed = smokeTestDescendants(card, allCards, process.cwd(), deps.fs);
+      if (regressed.length > 0) {
+        console.log(
+          `[${card.dotPath}] Smoke test regressed ${regressed.length} descendant(s):\n  ${regressed.join("\n  ")}`
+        );
+      }
     }
 
     const sessionId = dotPathToGuid(card.dotPath);

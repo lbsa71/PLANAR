@@ -6,6 +6,7 @@ import {
   checkTreeIntegrity,
   applyIntegrityResults,
   formatIntegrityReport,
+  smokeTestDescendants,
 } from "./integrity.js";
 import type { Card, FileSystem, IntegrityReport } from "./types.js";
 
@@ -535,5 +536,149 @@ describe("formatIntegrityReport", () => {
     const output = formatIntegrityReport(report);
     expect(output).not.toContain("=> flag-only");
     expect(output).toContain("broken-parent-link");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// smokeTestDescendants
+// ---------------------------------------------------------------------------
+
+describe("smokeTestDescendants", () => {
+  it("regresses DONE leaf with missing manifest file to PLAN", () => {
+    const cfs = captureFs();
+    const parent = makeCard({
+      dotPath: "1",
+      filePath: "plan/1-parent.md",
+      status: "PLAN",
+      isNode: true,
+      refs: { parent: null, root: null, children: ["plan/1.1-leaf.md"], blockedBy: [] },
+    });
+    const leaf = makeCard({
+      dotPath: "1.1",
+      filePath: "plan/1.1-leaf.md",
+      status: "DONE",
+      fileManifest: ["src/foo.ts"],
+      rawContent: `---\nparent: plan/1-parent.md\nroot: plan/root.md\n---\n# 1.1 Leaf [DONE]\n\n## File Manifest\n- src/foo.ts\n`,
+      refs: { parent: "plan/1-parent.md", root: null, children: [], blockedBy: [] },
+    });
+
+    // src/foo.ts does NOT exist on disk
+    const regressed = smokeTestDescendants(parent, [parent, leaf], "/cwd", cfs);
+    expect(regressed).toHaveLength(1);
+    expect(regressed[0]).toContain("1.1 → PLAN");
+    expect(regressed[0]).toContain("manifest file 'src/foo.ts' missing");
+
+    // Verify the file was written with PLAN status
+    const written = cfs.written.get("plan/1.1-leaf.md");
+    expect(written).toBeDefined();
+    expect(written).toContain("[PLAN]");
+    expect(written).toContain("regressed to PLAN by smoke-test");
+  });
+
+  it("does not regress leaf with valid manifest files", () => {
+    const existing = new Set(["/cwd/src/foo.ts"]);
+    const cfs: FileSystem = {
+      readFileSync: () => "",
+      writeFileSync: () => {},
+      existsSync: (p: string) => existing.has(p),
+      readdirSync: () => [],
+    };
+    const parent = makeCard({
+      dotPath: "1",
+      filePath: "plan/1-parent.md",
+      status: "PLAN",
+      isNode: true,
+      refs: { parent: null, root: null, children: ["plan/1.1-leaf.md"], blockedBy: [] },
+    });
+    const leaf = makeCard({
+      dotPath: "1.1",
+      filePath: "plan/1.1-leaf.md",
+      status: "DONE",
+      fileManifest: ["src/foo.ts"],
+      refs: { parent: "plan/1-parent.md", root: null, children: [], blockedBy: [] },
+    });
+
+    const regressed = smokeTestDescendants(parent, [parent, leaf], "/cwd", cfs);
+    expect(regressed).toHaveLength(0);
+  });
+
+  it("skips descendants still in PLAN phase", () => {
+    const cfs = captureFs();
+    const parent = makeCard({
+      dotPath: "1",
+      filePath: "plan/1-parent.md",
+      status: "PLAN",
+      isNode: true,
+      refs: { parent: null, root: null, children: ["plan/1.1-leaf.md"], blockedBy: [] },
+    });
+    const leaf = makeCard({
+      dotPath: "1.1",
+      filePath: "plan/1.1-leaf.md",
+      status: "PLAN",
+      fileManifest: ["src/missing.ts"],
+      refs: { parent: "plan/1-parent.md", root: null, children: [], blockedBy: [] },
+    });
+
+    const regressed = smokeTestDescendants(parent, [parent, leaf], "/cwd", cfs);
+    expect(regressed).toHaveLength(0);
+  });
+
+  it("regresses DONE node whose children are not all DONE", () => {
+    const cfs = captureFs();
+    const root = makeCard({
+      dotPath: "1",
+      filePath: "plan/1-root.md",
+      status: "PLAN",
+      isNode: true,
+      refs: { parent: null, root: null, children: ["plan/1.1-mid.md"], blockedBy: [] },
+    });
+    const mid = makeCard({
+      dotPath: "1.1",
+      filePath: "plan/1.1-mid.md",
+      status: "DONE",
+      isNode: true,
+      rawContent: `---\nparent: plan/1-root.md\nchildren:\n  - plan/1.1.1-leaf.md\n---\n# 1.1 Mid [DONE]\n`,
+      refs: { parent: "plan/1-root.md", root: null, children: ["plan/1.1.1-leaf.md"], blockedBy: [] },
+    });
+    const leaf = makeCard({
+      dotPath: "1.1.1",
+      filePath: "plan/1.1.1-leaf.md",
+      status: "IMPLEMENT",
+      refs: { parent: "plan/1.1-mid.md", root: null, children: [], blockedBy: [] },
+    });
+
+    const regressed = smokeTestDescendants(root, [root, mid, leaf], "/cwd", cfs);
+    expect(regressed.some((r) => r.includes("1.1 → PLAN"))).toBe(true);
+    expect(regressed.some((r) => r.includes("not DONE"))).toBe(true);
+  });
+
+  it("recursively walks multi-level descendants", () => {
+    const cfs = captureFs();
+    const root = makeCard({
+      dotPath: "1",
+      filePath: "plan/1-root.md",
+      status: "PLAN",
+      isNode: true,
+      refs: { parent: null, root: null, children: ["plan/1.1-mid.md"], blockedBy: [] },
+    });
+    const mid = makeCard({
+      dotPath: "1.1",
+      filePath: "plan/1.1-mid.md",
+      status: "ARCHITECT",
+      isNode: true,
+      refs: { parent: "plan/1-root.md", root: null, children: ["plan/1.1.1-leaf.md"], blockedBy: [] },
+    });
+    const leaf = makeCard({
+      dotPath: "1.1.1",
+      filePath: "plan/1.1.1-leaf.md",
+      status: "DONE",
+      fileManifest: ["src/deep.ts"],
+      rawContent: `---\nparent: plan/1.1-mid.md\n---\n# 1.1.1 Deep Leaf [DONE]\n\n## File Manifest\n- src/deep.ts\n`,
+      refs: { parent: "plan/1.1-mid.md", root: null, children: [], blockedBy: [] },
+    });
+
+    // src/deep.ts doesn't exist
+    const regressed = smokeTestDescendants(root, [root, mid, leaf], "/cwd", cfs);
+    expect(regressed.some((r) => r.includes("1.1.1 → PLAN"))).toBe(true);
   });
 });
